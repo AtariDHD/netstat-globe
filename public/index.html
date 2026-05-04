@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Netstat Globe</title>
+    <link rel="stylesheet" href="styles.css" />
+    <!-- Do not load three.js here: globe.gl ships a matching Three and will use window.THREE if set, which can break rendering. -->
+    <!-- <script src="https://unpkg.com/globe.gl@2.32.1/dist/globe.gl.min.js"></script> -->
+    <script src="//cdn.jsdelivr.net/npm/globe.gl"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="globe-stage">
+        <div id="globe"></div>
+        <div id="hud">
+          <h1>Netstat Globe</h1>
+          <p class="meta">
+            <span id="status">Connecting…</span>
+            <span id="count"></span>
+            <label class="hud-poll">
+              <span class="hud-poll-label">Update every</span>
+              <select id="poll-interval" title="How often to refresh connections from the server" aria-label="Update interval">
+                <option value="500">0.5 s</option>
+                <option value="1000">1 s</option>
+                <option value="2000">2 s</option>
+                <option value="3000" selected>3 s</option>
+                <option value="5000">5 s</option>
+                <option value="10000">10 s</option>
+                <option value="30000">30 s</option>
+              </select>
+            </label>
+          </p>
+          <p class="hint">TCP established + UDP endpoints · Globe arcs for TCP (public remote) and UDP sockets that report a specific public remote · Origin uses your public IP for private local addresses</p>
+          <div id="error" class="error" hidden></div>
+        </div>
+      </div>
+
+      <aside id="drawer" class="drawer" data-open="false" aria-label="Connections drawer">
+      <button type="button" id="drawer-tab" class="drawer-tab" aria-expanded="false" aria-controls="drawer-panel" title="Show connections">
+        <span class="drawer-tab-text">Connections</span>
+      </button>
+      <div id="drawer-panel" class="drawer-panel">
+        <div class="drawer-resize" role="separator" aria-orientation="vertical" aria-label="Resize connections panel" tabindex="0"></div>
+        <div class="drawer-inner">
+          <header class="drawer-header">
+            <h2 class="drawer-title">Connections</h2>
+            <button type="button" id="drawer-close" class="drawer-close" aria-label="Close connections panel">×</button>
+          </header>
+          <div class="drawer-scroll">
+            <div class="panel-tabs" role="tablist" aria-label="Connections view">
+              <button
+                type="button"
+                class="panel-tab"
+                role="tab"
+                id="tab-live"
+                aria-selected="true"
+                aria-controls="panel-live"
+                tabindex="0"
+              >
+                Live
+              </button>
+              <button
+                type="button"
+                class="panel-tab"
+                role="tab"
+                id="tab-history"
+                aria-selected="false"
+                aria-controls="panel-history"
+                tabindex="-1"
+              >
+                History
+              </button>
+            </div>
+            <div id="panel-live" class="tab-panel" role="tabpanel" aria-labelledby="tab-live">
+              <div class="table-toolbar table-toolbar-live">
+                <div class="protocol-filter" role="group" aria-label="Filter by protocol">
+                  <span class="protocol-filter-label">Show</span>
+                  <label class="protocol-filter-option"
+                    ><input type="radio" name="live-protocol-filter" value="tcp" /> TCP</label
+                  >
+                  <label class="protocol-filter-option"
+                    ><input type="radio" name="live-protocol-filter" value="udp" /> UDP</label
+                  >
+                  <label class="protocol-filter-option"
+                    ><input type="radio" name="live-protocol-filter" value="both" /> Both TCP &amp; UDP</label
+                  >
+                </div>
+                <button type="button" id="live-choose-columns" class="choose-columns-btn">
+                  Choose columns
+                </button>
+              </div>
+              <table id="live-connections-table" class="connections-table">
+                <thead>
+                  <tr>
+                    <th scope="col" class="col-sortable" data-col="pid" tabindex="0" aria-sort="none">PID</th>
+                    <th scope="col" class="col-sortable" data-col="process" tabindex="0" aria-sort="none">Process</th>
+                    <th scope="col" class="col-sortable" data-col="protocol" tabindex="0" aria-sort="none">Protocol</th>
+                    <th scope="col" class="col-sortable col-origin" data-col="local" tabindex="0" aria-sort="none">Local</th>
+                    <th scope="col" class="col-sortable" data-col="remote" tabindex="0" aria-sort="none">Remote</th>
+                    <th scope="col" class="col-sortable" data-col="remoteHost" tabindex="0" aria-sort="none">Remote Host</th>
+                    <th scope="col" class="col-sortable col-origin" data-col="from" tabindex="0" aria-sort="none">From</th>
+                    <th scope="col" class="col-sortable" data-col="to" tabindex="0" aria-sort="none">To</th>
+                    <th scope="col" class="col-sortable" data-col="createTime" tabindex="0" aria-sort="none">Create Time</th>
+                    <th scope="col" class="col-sortable" data-col="elapsed" tabindex="0" aria-sort="none">Elapsed</th>
+                  </tr>
+                </thead>
+                <tbody id="connections-tbody"></tbody>
+              </table>
+            </div>
+            <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
+              <div class="table-toolbar history-toolbar">
+                <div class="protocol-filter" role="group" aria-label="Filter history by protocol">
+                  <span class="protocol-filter-label">Show</span>
+                  <label class="protocol-filter-option"
+                    ><input type="radio" name="history-protocol-filter" value="tcp" /> TCP</label
+                  >
+                  <label class="protocol-filter-option"
+                    ><input type="radio" name="history-protocol-filter" value="udp" /> UDP</label
+                  >
+                  <label class="protocol-filter-option"
+                    ><input type="radio" name="history-protocol-filter" value="both" /> Both TCP &amp; UDP</label
+                  >
+                </div>
+                <button type="button" id="history-choose-columns" class="choose-columns-btn">
+                  Choose columns
+                </button>
+                <div class="history-toolbar-right">
+                  <label class="history-max-label">
+                    <span>Keep up to</span>
+                    <input type="number" id="history-max-rows" min="1" max="50000" step="1" value="2000" title="Maximum history rows (oldest dropped when exceeded)" />
+                    <span>rows</span>
+                  </label>
+                  <button type="button" id="history-clear" class="history-clear-btn">Clear</button>
+                </div>
+              </div>
+              <table id="history-connections-table" class="connections-table">
+                <thead>
+                  <tr>
+                    <th scope="col" class="col-sortable" data-col="time" tabindex="0" aria-sort="none">Time</th>
+                    <th scope="col" class="col-sortable" data-col="event" tabindex="0" aria-sort="none">Connection</th>
+                    <th scope="col" class="col-sortable" data-col="pid" tabindex="0" aria-sort="none">PID</th>
+                    <th scope="col" class="col-sortable" data-col="process" tabindex="0" aria-sort="none">Process</th>
+                    <th scope="col" class="col-sortable" data-col="protocol" tabindex="0" aria-sort="none">Protocol</th>
+                    <th scope="col" class="col-sortable col-origin" data-col="local" tabindex="0" aria-sort="none">Local</th>
+                    <th scope="col" class="col-sortable" data-col="remote" tabindex="0" aria-sort="none">Remote</th>
+                    <th scope="col" class="col-sortable" data-col="remoteHost" tabindex="0" aria-sort="none">Remote Host</th>
+                    <th scope="col" class="col-sortable col-origin" data-col="from" tabindex="0" aria-sort="none">From</th>
+                    <th scope="col" class="col-sortable" data-col="to" tabindex="0" aria-sort="none">To</th>
+                  </tr>
+                </thead>
+                <tbody id="history-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+      </aside>
+    </div>
+
+    <dialog id="choose-columns-dialog" class="choose-columns-dialog" aria-labelledby="choose-columns-title">
+      <div class="choose-columns-card">
+        <h3 id="choose-columns-title" class="choose-columns-title">Choose columns</h3>
+        <p id="choose-columns-subtitle" class="choose-columns-subtitle"></p>
+        <div id="choose-columns-list" class="choose-columns-list"></div>
+        <div class="choose-columns-actions">
+          <button type="button" id="choose-columns-reset" class="choose-columns-secondary">Reset to default</button>
+          <button type="button" id="choose-columns-close" class="choose-columns-primary">Close</button>
+        </div>
+      </div>
+    </dialog>
+
+    <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

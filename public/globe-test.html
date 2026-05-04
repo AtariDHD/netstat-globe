@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Globe render test (minimal)</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #020617;
+        color: #e2e8f0;
+        font-family: system-ui, sans-serif;
+      }
+      #panel {
+        padding: 0.75rem 1rem;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      #panel pre {
+        margin: 0.5rem 0 0;
+        padding: 0.5rem;
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        max-height: 28vh;
+        overflow: auto;
+      }
+      #globe-wrap {
+        height: calc(100% - 120px);
+        min-height: 320px;
+        position: relative;
+      }
+      #globe {
+        width: 100%;
+        height: 100%;
+      }
+      a {
+        color: #38bdf8;
+      }
+    </style>
+    <!-- Only globe.gl — no separate three.min.js (see index.html comment). -->
+    <!-- <script src="https://unpkg.com/globe.gl@2.32.1/dist/globe.gl.min.js"></script> -->
+    <script src="//cdn.jsdelivr.net/npm/globe.gl"></script>
+  </head>
+  <body>
+    <div id="panel">
+      <strong>Globe render test</strong> ·
+      <a href="/">Back to app</a>
+      <pre id="log">Initializing…</pre>
+    </div>
+    <div id="globe-wrap">
+      <div id="globe"></div>
+    </div>
+    <script>
+      (function () {
+        const logEl = document.getElementById('log');
+        const lines = [];
+        function log(msg) {
+          lines.push(String(msg));
+          logEl.textContent = lines.join('\n');
+        }
+
+        window.addEventListener('error', function (e) {
+          log('window.error: ' + (e.message || e));
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          log('unhandledrejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+        });
+
+        var canvas = document.createElement('canvas');
+        var gl =
+          canvas.getContext('webgl') ||
+          canvas.getContext('experimental-webgl');
+        log('WebGL: ' + (gl ? 'available' : 'NOT available (globe needs WebGL)'));
+
+        if (typeof Globe === 'undefined') {
+          log('Globe is undefined — globe.gl script failed to load.');
+          return;
+        }
+
+        var el = document.getElementById('globe');
+        var w = el.clientWidth || window.innerWidth;
+        var h = el.clientHeight || Math.min(window.innerHeight - 120, 480);
+        log('Container size (css px): ' + w + ' × ' + h);
+
+        try {
+          // Same texture URL as main app; optional: set waitForGlobeReady false if globe stays blank (texture hang).
+          var world = new Globe(el, { waitForGlobeReady: true, animateIn: true })
+            .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
+            .showAtmosphere(true)
+            .atmosphereColor('#3b82f6');
+
+          world.width(w).height(h);
+          world.pointOfView({ lat: 15, lng: 0, altitude: 2.2 }, 0);
+
+          log('new Globe(...) OK — check canvas below.');
+
+          setTimeout(function () {
+            var canvases = el.querySelectorAll('canvas');
+            log('Canvas count under #globe: ' + canvases.length);
+            if (canvases.length) {
+              var c = canvases[0];
+              log('First canvas size: ' + c.width + ' × ' + c.height + ' (drawing buffer px)');
+            }
+          }, 1500);
+        } catch (err) {
+          log('Error: ' + (err && err.message ? err.message : err));
+        }
+
+        window.addEventListener('resize', function () {
+          var rw = el.clientWidth;
+          var rh = el.clientHeight;
+          if (typeof world !== 'undefined' && world.width) {
+            world.width(rw).height(rh);
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

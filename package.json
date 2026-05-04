@@ -1,0 +1,17 @@
+{
+  "name": "netstat-globe",
+  "version": "1.0.0",
+  "description": "Real-time network connections on a 3D globe (Windows, Linux, macOS)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "restart": "node free-port.js && node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}
