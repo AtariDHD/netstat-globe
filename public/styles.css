@@ -38,6 +38,63 @@ body {
   height: 100%;
 }
 
+#globe.webgl-unsupported {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(
+      circle at 50% 45%,
+      rgba(30, 41, 59, 0.85) 0%,
+      rgba(2, 6, 23, 0.95) 65%,
+      #020617 100%
+    );
+}
+
+.webgl-unsupported-card {
+  max-width: 32rem;
+  width: 100%;
+  padding: 1.5rem 1.75rem;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.85);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  color: #e2e8f0;
+  text-align: left;
+}
+
+.webgl-unsupported-title {
+  margin: 0 0 0.6rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #f8fafc;
+}
+
+.webgl-unsupported-body {
+  margin: 0 0 0.65rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #cbd5e1;
+}
+
+.webgl-unsupported-help {
+  margin: 0.75rem 0 0;
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.webgl-unsupported-help a {
+  color: #38bdf8;
+  text-decoration: none;
+}
+
+.webgl-unsupported-help a:hover,
+.webgl-unsupported-help a:focus {
+  text-decoration: underline;
+}
+
 #hud {
   position: absolute;
   top: 0;

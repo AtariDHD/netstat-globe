@@ -9,14 +9,21 @@ const port = Number(process.argv[2] || process.env.PORT || 3847);
 if (process.platform === 'win32') {
   const script =
     `$ErrorActionPreference = 'SilentlyContinue'; ` +
-    `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
-    `if ($null -ne $c) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }`;
+    `try { ` +
+    `  $c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
+    `  if ($null -ne $c) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue } ` +
+    `} catch { } ` +
+    `exit 0`;
 
-  execFileSync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-    { stdio: 'inherit', windowsHide: true }
-  );
+  try {
+    execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { stdio: 'inherit', windowsHide: true }
+    );
+  } catch {
+    /* no listener on port, or PowerShell unavailable / errored — proceed to start the server */
+  }
 } else {
   try {
     const out = execFileSync(

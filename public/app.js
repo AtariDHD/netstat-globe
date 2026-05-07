@@ -132,15 +132,77 @@
   const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${wsProto}//${window.location.host}`;
 
-  const world = new Globe(globeEl)
-    .globeImageUrl('//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg')
-    .arcLabel('label')
-    .arcDashLength(1)
-    // arcColor / arcStroke set in syncArcStylesAndData() for hover highlighting
-    .pointColor(() => 'orange')
-    .pointAltitude(0)
-    .pointRadius(0.02)
-    .pointsMerge(true);
+  function hasWebGLSupport() {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+    if (!window.WebGLRenderingContext) return false;
+    try {
+      const canvas = document.createElement('canvas');
+      const gl =
+        canvas.getContext('webgl2') ||
+        canvas.getContext('webgl') ||
+        canvas.getContext('experimental-webgl');
+      if (!gl) return false;
+      const lose = gl.getExtension && gl.getExtension('WEBGL_lose_context');
+      if (lose && typeof lose.loseContext === 'function') lose.loseContext();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function renderWebGLUnsupportedMessage(targetEl) {
+    if (!targetEl) return;
+    targetEl.classList.add('webgl-unsupported');
+    targetEl.setAttribute('role', 'alert');
+    targetEl.innerHTML = `
+      <div class="webgl-unsupported-card">
+        <h2 class="webgl-unsupported-title">3D globe unavailable</h2>
+        <p class="webgl-unsupported-body">
+          Your browser does not have WebGL enabled, so the globe can't be rendered.
+          Connections will still appear in the panel on the right.
+        </p>
+        <p class="webgl-unsupported-body">
+          To see the globe, open this page in a browser that supports WebGL
+          (Chrome, Edge, Firefox, or Safari) and make sure WebGL / hardware
+          acceleration is enabled in the browser settings.
+        </p>
+        <p class="webgl-unsupported-help">
+          You can verify WebGL support at
+          <a href="https://get.webgl.org/" target="_blank" rel="noopener noreferrer">get.webgl.org</a>.
+        </p>
+      </div>
+    `;
+  }
+
+  function createGlobeStub() {
+    const stub = new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (prop === 'then') return undefined;
+          return () => stub;
+        },
+      }
+    );
+    return stub;
+  }
+
+  const webGLSupported = hasWebGLSupport();
+  const world = webGLSupported
+    ? new Globe(globeEl)
+        .globeImageUrl('//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg')
+        .arcLabel('label')
+        .arcDashLength(1)
+        // arcColor / arcStroke set in syncArcStylesAndData() for hover highlighting
+        .pointColor(() => 'orange')
+        .pointAltitude(0)
+        .pointRadius(0.02)
+        .pointsMerge(true)
+    : createGlobeStub();
+
+  if (!webGLSupported) {
+    renderWebGLUnsupportedMessage(globeEl);
+  }
 
   function loadSavedPov() {
     try {
