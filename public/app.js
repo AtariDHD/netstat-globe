@@ -33,8 +33,11 @@
   const LS_HISTORY_SORT_KEY = 'netstatGlobeHistorySortKey';
   const LS_HISTORY_SORT_DIR = 'netstatGlobeHistorySortDir';
   const LS_DRAWER_TAB = 'netstatGlobeDrawerTab';
+  const LS_HIGHLIGHT_RULES = 'netstatGlobeHighlightRules';
   const LS_PROTOCOL_FILTER_LIVE = 'netstatGlobeProtocolFilterLive';
   const LS_PROTOCOL_FILTER_HISTORY = 'netstatGlobeProtocolFilterHistory';
+  const LS_LIVE_SEARCH = 'netstatGlobeLiveSearch';
+  const LIVE_SEARCH_COLS = ['process', 'local', 'remote', 'remoteHost', 'from', 'to'];
   const TABLE_HISTORY_SORT_IDS = [
     'time',
     'event',
@@ -286,6 +289,701 @@
   const LINK_OPACITY = Math.min(0.96, OPACITY + 0.44);
   const FLASH_NEW_OPACITY = Math.min(0.95, OPACITY + 0.4);
 
+  const RULE_OPACITY = Math.min(0.96, OPACITY + 0.35);
+  const NOTIFY_THROTTLE_MS = 10000;
+
+  const FILTER_BY_OPTIONS = [
+    { id: 'remoteIp', label: 'Remote IP address' },
+    { id: 'remoteHostname', label: 'Remote hostname' },
+    { id: 'remoteLocation', label: 'Remote location' },
+    { id: 'adTrackerList', label: 'Ad Tracker List' },
+  ];
+
+  const AD_TRACKER_LISTS = [
+    {
+      id: 'easylist.to',
+      label: 'easylist.to',
+      url: 'https://easylist.to/easylist/easylist.txt',
+    },
+  ];
+
+  /** @type {Map<string, { domains: Set<string>, loading?: boolean, error?: string }>} */
+  const adTrackerListCache = new Map();
+  /** @type {Map<string, Promise<Set<string>>>} */
+  const adTrackerListLoads = new Map();
+
+  const NOTIFICATION_OPTIONS = [
+    { id: 'disabled', label: 'Disabled' },
+    { id: 'browser', label: 'Web browser notification' },
+  ];
+
+  /** @type {Array<{ id: string, label: string, filterBy: string, useRegex?: boolean, filter: string, color: string, notification: string }>} */
+  let highlightRules = [];
+  /** @type {Map<string, { color: string, ruleId: string }>} */
+  let matchStyleByConnectionKey = new Map();
+  /** @type {{ lastSentAt: number, timer: any, pendingByRuleId: Map<string, number> }} */
+  const notifyAgg = { lastSentAt: 0, timer: null, pendingByRuleId: new Map() };
+
+  function safeRandomId() {
+    try {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    } catch {
+      /* ignore */
+    }
+    return `r_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
+
+  function defaultRule() {
+    return {
+      id: safeRandomId(),
+      label: '',
+      filterBy: 'remoteHostname',
+      filter: '',
+      color: '#22c55e',
+      notification: 'disabled',
+    };
+  }
+
+  function loadHighlightRules() {
+    try {
+      const raw = localStorage.getItem(LS_HIGHLIGHT_RULES);
+      if (!raw) return [defaultRule()];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [defaultRule()];
+      const out = [];
+      for (const r of arr) {
+        if (!r || typeof r !== 'object') continue;
+        const id = typeof r.id === 'string' && r.id ? r.id : safeRandomId();
+        const label = r.label != null ? String(r.label) : '';
+        const rawFilterBy = r.filterBy === 'remoteIpRange' ? 'remoteIp' : r.filterBy;
+        const filterBy = FILTER_BY_OPTIONS.some((o) => o.id === rawFilterBy)
+          ? rawFilterBy
+          : 'remoteHostname';
+        const filter = r.filter != null ? String(r.filter) : '';
+        const color = typeof r.color === 'string' && r.color ? r.color : '#22c55e';
+        const notification = NOTIFICATION_OPTIONS.some((o) => o.id === r.notification) ? r.notification : 'disabled';
+        out.push({ id, label, filterBy, filter, color, notification });
+      }
+      return out.length ? out : [defaultRule()];
+    } catch {
+      return [defaultRule()];
+    }
+  }
+
+  function saveHighlightRules() {
+    try {
+      localStorage.setItem(LS_HIGHLIGHT_RULES, JSON.stringify(highlightRules));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function isRuleFilled(r) {
+    if (!r) return false;
+    if (r.filterBy === 'adTrackerList') {
+      const listId = String(r.filter || '').trim();
+      if (!listId) return false;
+      const cached = adTrackerListCache.get(listId);
+      return !!(cached && cached.domains && cached.domains.size > 0);
+    }
+    return !!(typeof r.filter === 'string' && r.filter.trim() !== '');
+  }
+
+  function normalizeHostnameForMatch(hostname) {
+    let h = String(hostname || '')
+      .trim()
+      .toLowerCase();
+    if (!h || h === '—') return '';
+    if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+    const colon = h.lastIndexOf(':');
+    if (colon > 0 && h.indexOf('.') === -1 && h.includes(':')) {
+      h = h.slice(0, colon);
+    }
+    return h.replace(/\.$/, '');
+  }
+
+  /** Extract blockable hostnames from Adblock Plus / EasyList filter text. */
+  function parseEasyListDomains(text) {
+    const domains = new Set();
+    for (const rawLine of String(text || '').split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('!')) continue;
+      if (line.startsWith('@@') || line.startsWith('##') || line.startsWith('#@#')) continue;
+
+      let candidate = null;
+      if (line.startsWith('||')) {
+        let rest = line.slice(2);
+        const end = rest.search(/[\^\/\$\|]/);
+        const chunk = (end === -1 ? rest : rest.slice(0, end)).trim();
+        candidate = chunk;
+      } else {
+        const urlAnchor = line.match(/^\|https?:\/\/([^\/\^\$\|]+)/i);
+        if (urlAnchor) candidate = urlAnchor[1];
+      }
+      if (!candidate) continue;
+
+      let host = candidate.split('/')[0].split(':')[0].trim().toLowerCase();
+      if (host.startsWith('*.')) host = host.slice(2);
+      if (!host || !host.includes('.')) continue;
+      if (!/^[\w.*-]+(\.[\w.*-]+)+$/.test(host)) continue;
+      if (host.includes('*')) continue;
+      domains.add(host);
+    }
+    return domains;
+  }
+
+  function hostnameMatchesAdTrackerList(hostname, domains) {
+    const h = normalizeHostnameForMatch(hostname);
+    if (!h || !domains || domains.size === 0) return false;
+    if (domains.has(h)) return true;
+    let dot = h.indexOf('.');
+    while (dot !== -1) {
+      const suffix = h.slice(dot + 1);
+      if (domains.has(suffix)) return true;
+      dot = h.indexOf('.', dot + 1);
+    }
+    return false;
+  }
+
+  function adTrackerListMeta(listId) {
+    return AD_TRACKER_LISTS.find((x) => x.id === listId) || null;
+  }
+
+  async function fetchAdTrackerListText(listId) {
+    const meta = adTrackerListMeta(listId);
+    if (!meta) throw new Error('Unknown ad tracker list');
+
+    try {
+      const direct = await fetch(meta.url, { cache: 'no-store' });
+      if (direct.ok) return direct.text();
+    } catch {
+      /* try same-origin proxy */
+    }
+
+    const proxied = await fetch(`/api/blocklist/${encodeURIComponent(listId)}`, { cache: 'no-store' });
+    if (!proxied.ok) {
+      let detail = `HTTP ${proxied.status}`;
+      try {
+        const j = await proxied.json();
+        if (j && j.error) detail = String(j.error);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    return proxied.text();
+  }
+
+  function loadAdTrackerList(listId) {
+    const id = String(listId || '').trim();
+    if (!id || !adTrackerListMeta(id)) return Promise.resolve(null);
+
+    const existing = adTrackerListCache.get(id);
+    if (existing && existing.domains && existing.domains.size > 0) {
+      return Promise.resolve(existing.domains);
+    }
+
+    const inflight = adTrackerListLoads.get(id);
+    if (inflight) return inflight;
+
+    const meta = adTrackerListMeta(id);
+    adTrackerListCache.set(id, { domains: new Set(), loading: true });
+
+    const promise = (async () => {
+      showCopyToast(`Retrieving ${meta.label}…`);
+      try {
+        const text = await fetchAdTrackerListText(id);
+        const domains = parseEasyListDomains(text);
+        adTrackerListCache.set(id, { domains });
+        showCopyToast(`${meta.label} loaded (${domains.size.toLocaleString()} domains)`);
+        syncAddRuleButtonDisabled();
+        refreshTableAndArcs();
+        return domains;
+      } catch (e) {
+        adTrackerListCache.set(id, { domains: new Set(), error: String(e.message || e) });
+        showCopyToast(`Could not load ${meta.label}: ${String(e.message || e)}`);
+        syncAddRuleButtonDisabled();
+        throw e;
+      } finally {
+        adTrackerListLoads.delete(id);
+      }
+    })();
+
+    adTrackerListLoads.set(id, promise);
+    return promise;
+  }
+
+  function hexToRgba(hex, alpha) {
+    const h = String(hex || '').trim();
+    const m = h.match(/^#?([0-9a-f]{6})$/i);
+    if (!m) return `rgba(56, 189, 248, ${alpha})`;
+    const int = parseInt(m[1], 16);
+    const r = (int >> 16) & 255;
+    const g = (int >> 8) & 255;
+    const b = int & 255;
+    const a = Math.max(0, Math.min(1, Number(alpha)));
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+
+  function parseIpv4ToInt(ip) {
+    const parts = String(ip || '').trim().split('.');
+    if (parts.length !== 4) return null;
+    let out = 0;
+    for (const p of parts) {
+      if (!/^\d+$/.test(p)) return null;
+      const n = Number(p);
+      if (!Number.isFinite(n) || n < 0 || n > 255) return null;
+      out = (out << 8) + n;
+    }
+    return out >>> 0;
+  }
+
+  function parseIpRangeSpec(spec) {
+    const s = String(spec || '').trim();
+    if (!s) return null;
+    const cidr = s.match(/^(\d{1,3}(?:\.\d{1,3}){3})\s*\/\s*(\d{1,2})$/);
+    if (cidr) {
+      const base = parseIpv4ToInt(cidr[1]);
+      const bits = Number(cidr[2]);
+      if (base == null || !Number.isFinite(bits) || bits < 0 || bits > 32) return null;
+      const mask = bits === 0 ? 0 : ((0xffffffff << (32 - bits)) >>> 0);
+      return { kind: 'cidr', base, mask };
+    }
+    const range = s.match(/^(\d{1,3}(?:\.\d{1,3}){3})\s*-\s*(\d{1,3}(?:\.\d{1,3}){3})$/);
+    if (range) {
+      const a = parseIpv4ToInt(range[1]);
+      const b = parseIpv4ToInt(range[2]);
+      if (a == null || b == null) return null;
+      return { kind: 'range', start: Math.min(a, b), end: Math.max(a, b) };
+    }
+    const single = parseIpv4ToInt(s);
+    if (single != null) return { kind: 'single', ip: single };
+    return null;
+  }
+
+  function remoteLocationForConnectionKey(connectionKey, placesByKey, arcsByKey) {
+    const p = placesByKey && connectionKey ? placesByKey.get(connectionKey) : null;
+    if (p && p.end && p.end !== '—') return String(p.end);
+    const arc = arcsByKey && connectionKey ? arcsByKey.get(connectionKey) : null;
+    if (arc && arc.endPlace) return String(arc.endPlace);
+    if (arc && arc.remoteCountry) return String(arc.remoteCountry);
+    return '';
+  }
+
+  function getRuleFieldValue(rule, conn, placesByKey, arcsByKey) {
+    const which = rule && rule.filterBy ? String(rule.filterBy) : '';
+    if (which === 'remoteHostname') return String(conn && conn.remoteHost ? conn.remoteHost : '');
+    if (which === 'remoteLocation') {
+      const ck = conn && conn.connectionKey ? String(conn.connectionKey) : '';
+      return remoteLocationForConnectionKey(ck, placesByKey, arcsByKey);
+    }
+    if (which === 'remoteIp') return String(conn && conn.remoteAddress ? conn.remoteAddress : '');
+    return '';
+  }
+
+  function parseFilterCsv(filter) {
+    return String(filter || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  function parseSlashRegex(expr) {
+    const s = String(expr || '').trim();
+    if (s.length < 2) return null;
+    if (!s.startsWith('/') || !s.endsWith('/')) return null;
+    const body = s.slice(1, -1);
+    if (!body) return null;
+    try {
+      return new RegExp(body, 'i');
+    } catch {
+      return null;
+    }
+  }
+
+  function escapeRegexLiteral(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function wildcardExprToRegex(expr) {
+    // '*' matches 1+ characters (not 0+), case-insensitive by caller.
+    const parts = String(expr || '').split('*').map(escapeRegexLiteral);
+    if (parts.length === 1) return null;
+    return new RegExp(parts.join('.+'), 'i');
+  }
+
+  function matchesTextOrWildcard(value, expr) {
+    const v = String(value || '').trim();
+    const e = String(expr || '').trim();
+    if (!v || !e) return false;
+    const re = wildcardExprToRegex(e);
+    if (re) return re.test(v);
+    return v.toLowerCase().includes(e.toLowerCase());
+  }
+
+  function ipWildcardMatches(ip, expr) {
+    const p = String(expr || '').trim();
+    if (!p.includes('*')) return false;
+    const ipParts = String(ip || '').trim().split('.');
+    const patParts = p.split('.');
+    if (ipParts.length !== 4) return false;
+    if (patParts.length < 1 || patParts.length > 4) return false;
+    for (let i = 0; i < patParts.length; i++) {
+      const seg = patParts[i].trim();
+      if (seg === '*') return true; // match rest
+      if (!/^\d{1,3}$/.test(seg)) return false;
+      const n = Number(seg);
+      if (!Number.isFinite(n) || n < 0 || n > 255) return false;
+      if (ipParts[i] !== String(n)) return false;
+    }
+    // If pattern is shorter than 4 without '*' it must match exact prefix; treat as no-match.
+    return patParts.length === 4;
+  }
+
+  function matchesRemoteIp(ip, expr) {
+    const ipStr = String(ip || '').trim();
+    if (!ipStr) return false;
+    const re = parseSlashRegex(expr);
+    if (re) return re.test(ipStr);
+
+    const parsed = parseIpRangeSpec(expr);
+    if (parsed) {
+      const ipInt = parseIpv4ToInt(ipStr);
+      if (ipInt == null) return false;
+      if (parsed.kind === 'single') return ipInt === parsed.ip;
+      if (parsed.kind === 'range') return ipInt >= parsed.start && ipInt <= parsed.end;
+      if (parsed.kind === 'cidr') return ((ipInt & parsed.mask) >>> 0) === ((parsed.base & parsed.mask) >>> 0);
+      return false;
+    }
+    if (ipWildcardMatches(ipStr, expr)) return true;
+    return false;
+  }
+
+  function ruleMatchesConnection(rule, conn, placesByKey, arcsByKey) {
+    if (!rule || !conn) return false;
+
+    if (rule.filterBy === 'adTrackerList') {
+      const listId = String(rule.filter || '').trim();
+      if (!listId) return false;
+      const cached = adTrackerListCache.get(listId);
+      if (!cached || !cached.domains || cached.domains.size === 0) return false;
+      const hostname = String(conn && conn.remoteHost ? conn.remoteHost : '').trim();
+      if (!hostname || hostname === '—') return false;
+      return hostnameMatchesAdTrackerList(hostname, cached.domains);
+    }
+
+    const value = String(getRuleFieldValue(rule, conn, placesByKey, arcsByKey) || '').trim();
+    if (!value || value === '—') return false;
+
+    const list = parseFilterCsv(rule.filter);
+    if (list.length === 0) return false;
+
+    // Regex mode: expr is /.../ (always case-insensitive)
+    for (const expr of list) {
+      const re = parseSlashRegex(expr);
+      if (re) {
+        if (re.test(value)) return true;
+        continue;
+      }
+
+      if (String(rule.filterBy) === 'remoteIp') {
+        if (matchesRemoteIp(value, expr)) return true;
+        continue;
+      }
+
+      if (matchesTextOrWildcard(value, expr)) return true;
+    }
+    return false;
+  }
+
+  function computeMatchStyles(connections, placesByKey, arcsByKey) {
+    const out = new Map();
+    const rows = connections || [];
+    for (const c of rows) {
+      const ck = c && c.connectionKey != null ? String(c.connectionKey) : '';
+      if (!ck) continue;
+      for (const r of highlightRules) {
+        if (!isRuleFilled(r)) continue;
+        if (ruleMatchesConnection(r, c, placesByKey, arcsByKey)) {
+          out.set(ck, { color: r.color || '#22c55e', ruleId: r.id });
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  function setNotificationStatus(text) {
+    const el = document.getElementById('settings-notification-status');
+    if (!el) return;
+    if (!text) {
+      el.hidden = true;
+      el.textContent = '';
+      return;
+    }
+    el.hidden = false;
+    el.textContent = text;
+  }
+
+  async function ensureNotificationPermissionIfNeeded() {
+    if (typeof Notification === 'undefined') {
+      setNotificationStatus('Browser notifications are not supported in this browser.');
+      return 'unsupported';
+    }
+    if (Notification.permission === 'granted') {
+      setNotificationStatus('');
+      return 'granted';
+    }
+    if (Notification.permission === 'denied') {
+      setNotificationStatus('Browser notifications are blocked. Enable them in your browser site settings to use notifications.');
+      return 'denied';
+    }
+    try {
+      const res = await Notification.requestPermission();
+      if (res === 'granted') setNotificationStatus('');
+      else setNotificationStatus('Browser notifications are not enabled yet.');
+      return res;
+    } catch {
+      setNotificationStatus('Could not request browser notification permission.');
+      return 'error';
+    }
+  }
+
+  function ruleDisplayLabel(r) {
+    const t = r && r.label != null ? String(r.label).trim() : '';
+    return t || 'Unnamed rule';
+  }
+
+  function scheduleNotificationFlush() {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'granted') return;
+    if (notifyAgg.timer) return;
+    const now = Date.now();
+    const nextAt = Math.max(notifyAgg.lastSentAt + NOTIFY_THROTTLE_MS, now + 500);
+    notifyAgg.timer = setTimeout(() => {
+      notifyAgg.timer = null;
+      flushNotificationsNow();
+    }, Math.max(0, nextAt - now));
+  }
+
+  function flushNotificationsNow() {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'granted') return;
+    const entries = Array.from(notifyAgg.pendingByRuleId.entries()).filter(([, c]) => (c || 0) > 0);
+    if (entries.length === 0) return;
+
+    const total = entries.reduce((a, [, c]) => a + (c || 0), 0);
+    const title = 'Netstat Globe';
+    let body = '';
+
+    if (entries.length === 1) {
+      const [ruleId, count] = entries[0];
+      const r = highlightRules.find((x) => x && x.id === ruleId) || null;
+      const label = ruleDisplayLabel(r);
+      body = `${count} connection${count === 1 ? '' : 's'} matching rule: "${label}".`;
+    } else {
+      body = `${total} connection${total === 1 ? '' : 's'} matching several network notification rules.`;
+    }
+
+    try {
+      new Notification(title, { body });
+      notifyAgg.lastSentAt = Date.now();
+    } catch {
+      /* ignore */
+    } finally {
+      notifyAgg.pendingByRuleId.clear();
+    }
+  }
+
+  function enqueueRuleNotification(ruleId) {
+    const prev = notifyAgg.pendingByRuleId.get(ruleId) || 0;
+    notifyAgg.pendingByRuleId.set(ruleId, prev + 1);
+    scheduleNotificationFlush();
+  }
+
+  function maybeNotifyForConnection(conn, placesByKey, arcsByKey) {
+    if (!conn || typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'granted') return;
+    for (const r of highlightRules) {
+      if (!r || r.notification !== 'browser') continue;
+      if (!isRuleFilled(r)) continue;
+      if (!ruleMatchesConnection(r, conn, placesByKey, arcsByKey)) continue;
+      enqueueRuleNotification(r.id);
+    }
+  }
+
+  function syncAddRuleButtonDisabled() {
+    const addBtn = document.getElementById('settings-add-rule');
+    if (!addBtn) return;
+    const last = highlightRules[highlightRules.length - 1];
+    addBtn.disabled = !last || !isRuleFilled(last);
+  }
+
+  function renderSettingsRules() {
+    const host = document.getElementById('settings-rules');
+    const addBtn = document.getElementById('settings-add-rule');
+    if (!host || !addBtn) return;
+    host.replaceChildren();
+    const tpl = document.getElementById('settings-rule-template');
+
+    function syncAddDisabled() {
+      syncAddRuleButtonDisabled();
+    }
+
+    function fillSelect(sel, options, value) {
+      if (!sel) return;
+      sel.replaceChildren();
+      for (const opt of options) {
+        const o = document.createElement('option');
+        o.value = opt.id;
+        o.textContent = opt.label;
+        sel.appendChild(o);
+      }
+      sel.value = value;
+    }
+
+    highlightRules.forEach((r, idx) => {
+      let card = null;
+      if (tpl && tpl instanceof HTMLTemplateElement && tpl.content) {
+        const frag = tpl.content.cloneNode(true);
+        card = frag.querySelector('.settings-rule');
+        if (!card) {
+          host.appendChild(frag);
+          card = host.lastElementChild;
+        } else {
+          host.appendChild(frag);
+        }
+      } else {
+        // Fallback: if template is missing, don't crash the settings panel.
+        card = document.createElement('div');
+        card.className = 'settings-rule';
+        host.appendChild(card);
+      }
+
+      card.setAttribute('data-rule-id', r.id);
+
+      const titleEl = card.querySelector('[data-role="rule-title"]');
+      if (titleEl) titleEl.textContent = `Rule ${idx + 1}`;
+
+      const removeBtn = card.querySelector('[data-role="rule-remove"]');
+      if (removeBtn) {
+        removeBtn.disabled = highlightRules.length <= 1;
+        removeBtn.addEventListener('click', () => {
+          highlightRules = highlightRules.filter((x) => x.id !== r.id);
+          if (highlightRules.length === 0) highlightRules = [defaultRule()];
+          saveHighlightRules();
+          renderSettingsRules();
+          refreshTableAndArcs();
+        });
+      }
+
+      const labelInp = card.querySelector('[data-role="rule-label"]');
+      if (labelInp instanceof HTMLInputElement) {
+        labelInp.value = r.label || '';
+        labelInp.addEventListener('input', () => {
+          r.label = labelInp.value;
+          saveHighlightRules();
+        });
+      }
+
+      const filterBySel = card.querySelector('[data-role="rule-filter-by"]');
+      const filterLabelEl = card.querySelector('[data-role="rule-filter-label"]');
+      const filterInp = card.querySelector('[data-role="rule-filter"]');
+      const filterListSel = card.querySelector('[data-role="rule-filter-list"]');
+      const isAdTrackerList = r.filterBy === 'adTrackerList';
+
+      if (filterLabelEl) {
+        filterLabelEl.textContent = isAdTrackerList ? 'List' : 'Filter';
+      }
+
+      if (filterBySel instanceof HTMLSelectElement) {
+        fillSelect(filterBySel, FILTER_BY_OPTIONS, r.filterBy);
+        filterBySel.addEventListener('change', () => {
+          const prev = r.filterBy;
+          r.filterBy = filterBySel.value;
+          if (r.filterBy === 'adTrackerList' && prev !== 'adTrackerList') {
+            r.filter = AD_TRACKER_LISTS[0] ? AD_TRACKER_LISTS[0].id : '';
+          } else if (prev === 'adTrackerList' && r.filterBy !== 'adTrackerList') {
+            r.filter = '';
+          }
+          saveHighlightRules();
+          renderSettingsRules();
+          refreshTableAndArcs();
+        });
+      }
+
+      const notifSel = card.querySelector('[data-role="rule-notifications"]');
+      if (notifSel instanceof HTMLSelectElement) {
+        fillSelect(notifSel, NOTIFICATION_OPTIONS, r.notification);
+        notifSel.addEventListener('change', async () => {
+          r.notification = notifSel.value;
+          saveHighlightRules();
+          if (r.notification === 'browser') {
+            await ensureNotificationPermissionIfNeeded();
+            scheduleNotificationFlush();
+          }
+        });
+      }
+
+      if (filterInp instanceof HTMLInputElement) {
+        filterInp.hidden = isAdTrackerList;
+        filterInp.disabled = isAdTrackerList;
+        if (!isAdTrackerList) {
+          filterInp.placeholder =
+            r.filterBy === 'remoteIp'
+              ? 'e.g. 180.92.1.177, 180.92.*, 180.92.1.1-180.92.1.255, or 180.92.1.0/24 (comma-delimited)'
+              : 'Comma-delimited list. Use * as wildcard, or /regex/ (case-insensitive)';
+          filterInp.value = r.filter || '';
+          filterInp.addEventListener('input', () => {
+            r.filter = filterInp.value;
+            saveHighlightRules();
+            refreshTableAndArcs();
+            syncAddDisabled();
+          });
+        }
+      }
+
+      if (filterListSel instanceof HTMLSelectElement) {
+        filterListSel.hidden = !isAdTrackerList;
+        filterListSel.disabled = !isAdTrackerList;
+        if (isAdTrackerList) {
+          fillSelect(filterListSel, AD_TRACKER_LISTS, r.filter || AD_TRACKER_LISTS[0]?.id || '');
+          if (!r.filter && AD_TRACKER_LISTS[0]) {
+            r.filter = AD_TRACKER_LISTS[0].id;
+            saveHighlightRules();
+          }
+          filterListSel.addEventListener('change', () => {
+            r.filter = filterListSel.value;
+            saveHighlightRules();
+            syncAddDisabled();
+            loadAdTrackerList(r.filter).catch(() => {
+              syncAddDisabled();
+            });
+          });
+          if (r.filter) {
+            loadAdTrackerList(r.filter).catch(() => {
+              syncAddDisabled();
+            });
+          }
+        }
+      }
+
+      const colorInp = card.querySelector('[data-role="rule-color"]');
+      if (colorInp instanceof HTMLInputElement) {
+        colorInp.value = typeof r.color === 'string' && r.color ? r.color : '#22c55e';
+        colorInp.addEventListener('input', () => {
+          r.color = colorInp.value;
+          saveHighlightRules();
+          refreshTableAndArcs();
+        });
+      }
+
+      // Regex is auto-detected via /.../ in the filter string.
+    });
+
+    syncAddDisabled();
+  }
+
   function currentArcList() {
     return Array.from(arcByKey.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
@@ -298,7 +996,18 @@
     const flash = flashState.get(key);
 
     if (linkedHighlightKey != null && key === linkedHighlightKey) {
-      return [`rgba(0, 255, 0, ${LINK_OPACITY})`, `rgba(255, 0, 0, ${LINK_OPACITY})`];
+      const ruleStyle = key ? matchStyleByConnectionKey.get(key) : null;
+      if (ruleStyle && ruleStyle.color) {
+        // Hover/linked highlight should use rule color with max opacity.
+        return [hexToRgba(ruleStyle.color, 1), hexToRgba(ruleStyle.color, 0.82)];
+      }
+      return [`rgba(0, 255, 0, 1)`, `rgba(255, 255, 0, 1)`];
+    }
+    const ruleStyle = key ? matchStyleByConnectionKey.get(key) : null;
+    if (ruleStyle && ruleStyle.color) {
+      const c1 = hexToRgba(ruleStyle.color, RULE_OPACITY);
+      const c2 = hexToRgba(ruleStyle.color, Math.max(0, RULE_OPACITY - 0.22));
+      return [c1, c2];
     }
     if (flash && flash.until > now) {
       if (flash.kind === 'removed') {
@@ -309,7 +1018,7 @@
         return [`rgba(34, 197, 94, ${op})`, `rgba(22, 163, 74, ${op})`];
       }
     }
-    return [`rgba(0, 255, 0, ${OPACITY})`, `rgba(255, 0, 0, ${OPACITY})`];
+    return [`rgba(0, 255, 0, ${OPACITY})`, `rgba(255, 255, 0, ${OPACITY})`];
   }
 
   function arcStrokeFor(d) {
@@ -344,10 +1053,14 @@
     if (!tbody) return;
     for (const tr of tbody.querySelectorAll('tr[data-connection-key]')) {
       const k = tr.getAttribute('data-connection-key') || '';
+      const style = k ? matchStyleByConnectionKey.get(k) : null;
       tr.classList.toggle(
         'is-linked-highlight',
         linkedHighlightKey != null && k === linkedHighlightKey
       );
+      // Provide per-row highlight color for CSS.
+      if (style && style.color) tr.style.setProperty('--linked-highlight-color', style.color);
+      else tr.style.removeProperty('--linked-highlight-color');
     }
   }
 
@@ -767,6 +1480,36 @@
     return 'both';
   }
 
+  let liveSearchQuery = '';
+
+  function loadLiveSearchQuery() {
+    try {
+      return localStorage.getItem(LS_LIVE_SEARCH) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function saveLiveSearchQuery(q) {
+    try {
+      const s = String(q || '');
+      if (s) localStorage.setItem(LS_LIVE_SEARCH, s);
+      else localStorage.removeItem(LS_LIVE_SEARCH);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function connectionMatchesLiveSearch(model, query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return true;
+    for (const col of LIVE_SEARCH_COLS) {
+      const v = String(model[col] ?? '').toLowerCase();
+      if (v && v !== '—' && v.includes(q)) return true;
+    }
+    return false;
+  }
+
   function getHistoryProtocolFilter() {
     try {
       const v = localStorage.getItem(LS_PROTOCOL_FILTER_HISTORY);
@@ -823,6 +1566,18 @@
     applyArcs(filteredA);
     const mergedC = buildMergedConnections();
     const filteredC = filterConnectionsByProtocol(mergedC, mode);
+    const arcsByKey = new Map();
+    const placesByKey = new Map();
+    for (const a of filteredA || []) {
+      if (a && a.connectionKey) {
+        arcsByKey.set(String(a.connectionKey), a);
+        placesByKey.set(String(a.connectionKey), {
+          start: a.startPlace || '—',
+          end: a.endPlace || '—',
+        });
+      }
+    }
+    matchStyleByConnectionKey = computeMatchStyles(filteredC, placesByKey, arcsByKey);
     renderConnectionsTable(filteredC, filteredA);
     syncTableRowHighlight();
     updateArcCountLabel();
@@ -1083,6 +1838,18 @@
     renderHistoryTable();
   }
 
+  function initLiveSearch() {
+    liveSearchQuery = loadLiveSearchQuery();
+    const inp = document.getElementById('live-connections-search');
+    if (!(inp instanceof HTMLInputElement)) return;
+    inp.value = liveSearchQuery;
+    inp.addEventListener('input', () => {
+      liveSearchQuery = inp.value;
+      saveLiveSearchQuery(liveSearchQuery);
+      refreshTableAndArcs();
+    });
+  }
+
   function initProtocolFilters() {
     const liveMode = getLiveProtocolFilter();
     for (const inp of document.querySelectorAll('input[name="live-protocol-filter"]')) {
@@ -1122,28 +1889,39 @@
     const histTab = document.getElementById('tab-history');
     const livePanel = document.getElementById('panel-live');
     const histPanel = document.getElementById('panel-history');
-    if (!liveTab || !histTab || !livePanel || !histPanel) return;
+    const settingsTab = document.getElementById('tab-settings');
+    const settingsPanel = document.getElementById('panel-settings');
+    if (!liveTab || !histTab || !settingsTab || !livePanel || !histPanel || !settingsPanel) return;
 
     function selectTab(which) {
-      const live = which === 'live';
-      liveTab.setAttribute('aria-selected', live ? 'true' : 'false');
-      histTab.setAttribute('aria-selected', live ? 'false' : 'true');
-      liveTab.tabIndex = live ? 0 : -1;
-      histTab.tabIndex = live ? -1 : 0;
-      livePanel.hidden = !live;
-      histPanel.hidden = live;
+      const w = which === 'settings' ? 'settings' : which === 'history' ? 'history' : 'live';
+      const isLive = w === 'live';
+      const isHist = w === 'history';
+      const isSettings = w === 'settings';
+
+      liveTab.setAttribute('aria-selected', isLive ? 'true' : 'false');
+      histTab.setAttribute('aria-selected', isHist ? 'true' : 'false');
+      settingsTab.setAttribute('aria-selected', isSettings ? 'true' : 'false');
+      liveTab.tabIndex = isLive ? 0 : -1;
+      histTab.tabIndex = isHist ? 0 : -1;
+      settingsTab.tabIndex = isSettings ? 0 : -1;
+      livePanel.hidden = !isLive;
+      histPanel.hidden = !isHist;
+      settingsPanel.hidden = !isSettings;
       try {
-        localStorage.setItem(LS_DRAWER_TAB, live ? 'live' : 'history');
+        localStorage.setItem(LS_DRAWER_TAB, w);
       } catch {
         /* ignore */
       }
+      if (isSettings) renderSettingsRules();
     }
 
     liveTab.addEventListener('click', () => selectTab('live'));
     histTab.addEventListener('click', () => selectTab('history'));
+    settingsTab.addEventListener('click', () => selectTab('settings'));
 
     const saved = localStorage.getItem(LS_DRAWER_TAB);
-    selectTab(saved === 'history' ? 'history' : 'live');
+    selectTab(saved === 'settings' ? 'settings' : saved === 'history' ? 'history' : 'live');
   }
 
   function initConnectionsTableUi() {
@@ -1282,19 +2060,36 @@
       }
     }
 
-    const models = (connections || []).map((c) => connectionRowModel(c, placesByKey));
-    models.sort(compareConnectionModels);
+    const allModels = (connections || []).map((c) => connectionRowModel(c, placesByKey));
+    allModels.sort(compareConnectionModels);
+    const searchQ = String(liveSearchQuery || '').trim();
+    const models = searchQ
+      ? allModels.filter((m) => connectionMatchesLiveSearch(m, searchQ))
+      : allModels;
 
-    const visibleColCount = countVisibleCols('live');
+    const visibleColCount = countVisibleCols('live') + 1;
 
     tbody.replaceChildren();
+
+    if (allModels.length === 0) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = visibleColCount;
+      td.className = 'connections-empty';
+      td.textContent = 'No connections.';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      syncTableHeaderSortState();
+      applyColumnVisibility('live');
+      return;
+    }
 
     if (models.length === 0) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
       td.colSpan = visibleColCount;
       td.className = 'connections-empty';
-      td.textContent = 'No connections.';
+      td.textContent = 'No connections match your search.';
       tr.appendChild(td);
       tbody.appendChild(tr);
       syncTableHeaderSortState();
@@ -1318,6 +2113,18 @@
       const tr = document.createElement('tr');
       const ck = m.connectionKey != null ? String(m.connectionKey) : '';
       if (ck) tr.setAttribute('data-connection-key', ck);
+
+      const tdDot = document.createElement('td');
+      tdDot.className = 'col-rule-dot';
+      const dot = document.createElement('span');
+      dot.className = 'rule-dot';
+      const style = ck ? matchStyleByConnectionKey.get(ck) : null;
+      if (style && style.color) {
+        dot.classList.add('rule-dot-active');
+        dot.style.background = style.color;
+      }
+      tdDot.appendChild(dot);
+      tr.appendChild(tdDot);
 
       const fk = ck ? flashState.get(ck) : null;
       if (fk && fk.until > nowMs) {
@@ -1377,6 +2184,10 @@
       for (const a of nextArcs) {
         if (a && a.connectionKey != null) arcByKeyNext.set(String(a.connectionKey), a);
       }
+      const placesByKeyNext = new Map();
+      for (const [k, a] of arcByKeyNext) {
+        placesByKeyNext.set(k, { start: a.startPlace || '—', end: a.endPlace || '—' });
+      }
 
       for (const k of nextKeys) {
         if (!prevKeys.has(k)) {
@@ -1384,6 +2195,7 @@
           const conn = nextConn.find((c) => String(c.connectionKey) === k);
           if (conn) {
             appendHistoryEvent('connect', { ...conn }, arcByKeyNext.get(k) || null);
+            maybeNotifyForConnection(conn, placesByKeyNext, arcByKeyNext);
           }
         }
       }
@@ -1484,9 +2296,27 @@
   initPollIntervalControl();
   initConnectionsTableUi();
   initHistoryTableUi();
+  highlightRules = loadHighlightRules();
+  for (const r of highlightRules) {
+    if (r && r.filterBy === 'adTrackerList' && r.filter) {
+      loadAdTrackerList(r.filter).catch(() => {});
+    }
+  }
+  const addRuleBtn = document.getElementById('settings-add-rule');
+  if (addRuleBtn) {
+    addRuleBtn.addEventListener('click', () => {
+      const last = highlightRules[highlightRules.length - 1];
+      if (last && !isRuleFilled(last)) return;
+      highlightRules.push(defaultRule());
+      saveHighlightRules();
+      renderSettingsRules();
+      refreshTableAndArcs();
+    });
+  }
   initPanelTabs();
   initChooseColumnsDialog();
   initProtocolFilters();
+  initLiveSearch();
   applyAllColumnVisibility();
   connect();
 

@@ -18,18 +18,6 @@
           <p class="meta">
             <span id="status">Connecting…</span>
             <span id="count"></span>
-            <label class="hud-poll">
-              <span class="hud-poll-label">Update every</span>
-              <select id="poll-interval" title="How often to refresh connections from the server" aria-label="Update interval">
-                <option value="500">0.5 s</option>
-                <option value="1000">1 s</option>
-                <option value="2000">2 s</option>
-                <option value="3000" selected>3 s</option>
-                <option value="5000">5 s</option>
-                <option value="10000">10 s</option>
-                <option value="30000">30 s</option>
-              </select>
-            </label>
           </p>
           <p class="hint">TCP established + UDP endpoints · Globe arcs for TCP (public remote) and UDP sockets that report a specific public remote · Origin uses your public IP for private local addresses</p>
           <div id="error" class="error" hidden></div>
@@ -71,6 +59,17 @@
               >
                 History
               </button>
+              <button
+                type="button"
+                class="panel-tab"
+                role="tab"
+                id="tab-settings"
+                aria-selected="false"
+                aria-controls="panel-settings"
+                tabindex="-1"
+              >
+                Settings
+              </button>
             </div>
             <div id="panel-live" class="tab-panel" role="tabpanel" aria-labelledby="tab-live">
               <div class="table-toolbar table-toolbar-live">
@@ -86,6 +85,18 @@
                     ><input type="radio" name="live-protocol-filter" value="both" /> Both TCP &amp; UDP</label
                   >
                 </div>
+                <label class="live-search-label" for="live-connections-search">
+                  <span class="live-search-label-text">Search</span>
+                  <input
+                    type="search"
+                    id="live-connections-search"
+                    class="live-search-input"
+                    placeholder="Process, local, remote, host, from, to…"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-label="Search live connections"
+                  />
+                </label>
                 <button type="button" id="live-choose-columns" class="choose-columns-btn">
                   Choose columns
                 </button>
@@ -93,6 +104,7 @@
               <table id="live-connections-table" class="connections-table">
                 <thead>
                   <tr>
+                    <th scope="col" class="col-rule-dot" aria-label="Rule highlight"></th>
                     <th scope="col" class="col-sortable" data-col="pid" tabindex="0" aria-sort="none">PID</th>
                     <th scope="col" class="col-sortable" data-col="process" tabindex="0" aria-sort="none">Process</th>
                     <th scope="col" class="col-sortable" data-col="protocol" tabindex="0" aria-sort="none">Protocol</th>
@@ -152,11 +164,81 @@
                 <tbody id="history-tbody"></tbody>
               </table>
             </div>
+            <div id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-settings" hidden>
+              <div class="settings-section">
+                <h3 class="settings-title">Update frequency</h3>
+                <label class="settings-row" for="poll-interval">
+                  <span class="settings-label">Update every</span>
+                  <select id="poll-interval" class="settings-select" title="How often to refresh connections from the server" aria-label="Update interval">
+                    <option value="500">0.5 s</option>
+                    <option value="1000">1 s</option>
+                    <option value="2000">2 s</option>
+                    <option value="3000" selected>3 s</option>
+                    <option value="5000">5 s</option>
+                    <option value="10000">10 s</option>
+                    <option value="30000">30 s</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="settings-section">
+                <h3 class="settings-title">Highlight &amp; notification rules</h3>
+                <p class="settings-help">
+                  Rules highlight matching arcs on the globe and show a colored dot in the live connections list.
+                  Browser notifications are only sent when a new matching connection appears.
+                </p>
+                <div id="settings-rules" class="settings-rules"></div>
+                <div class="settings-actions">
+                  <button type="button" id="settings-add-rule" class="settings-add-btn">Add rule</button>
+                </div>
+                <p id="settings-notification-status" class="settings-help settings-notification-status" hidden></p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
       </aside>
     </div>
+
+    <template id="settings-rule-template">
+      <div class="settings-rule" data-rule-id="">
+        <div class="settings-rule-header">
+          <p class="settings-rule-title" data-role="rule-title">Rule</p>
+          <button type="button" class="settings-rule-remove" data-role="rule-remove">Remove</button>
+        </div>
+
+        <div class="settings-grid">
+
+          <label class="settings-field">
+            <span class="settings-field-label">Label</span>
+            <input class="settings-input" type="text" placeholder="e.g. Spain" data-role="rule-label" />
+          </label>
+
+          <div class="settings-group">
+            <label class="settings-field settings-field-color">
+              <span class="settings-field-label">Highlight</span>
+              <input class="settings-color" type="color" value="#22c55e" data-role="rule-color" />
+            </label>
+            <label class="settings-field">
+              <span class="settings-field-label">Notifications</span>
+              <select class="settings-select" data-role="rule-notifications"></select>
+            </label>
+          </div>
+
+          <label class="settings-field">
+            <span class="settings-field-label">Filter by</span>
+            <select class="settings-select" data-role="rule-filter-by"></select>
+          </label>
+
+          <label class="settings-field" data-role="rule-filter-wrap">
+            <span class="settings-field-label" data-role="rule-filter-label">Filter</span>
+            <input class="settings-input" type="text" placeholder="Enter a value…" data-role="rule-filter" />
+            <select class="settings-select" data-role="rule-filter-list" hidden aria-label="Ad tracker list"></select>
+          </label>
+
+        </div>
+      </div>
+    </template>
 
     <dialog id="choose-columns-dialog" class="choose-columns-dialog" aria-labelledby="choose-columns-title">
       <div class="choose-columns-card">

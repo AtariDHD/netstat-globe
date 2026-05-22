@@ -893,6 +893,30 @@ app.get('/api/raw-tcp', async (req, res) => {
   }
 });
 
+/** Proxy allowed ad-block list URLs (avoids browser CORS when loading filter lists). */
+const BLOCKLIST_SOURCES = {
+  'easylist.to': 'https://easylist.to/easylist/easylist.txt',
+};
+
+app.get('/api/blocklist/:id', async (req, res) => {
+  const url = BLOCKLIST_SOURCES[req.params.id];
+  if (!url) {
+    res.status(404).json({ ok: false, error: 'Unknown blocklist id' });
+    return;
+  }
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'NetstatGlobe/1.0' } });
+    if (!r.ok) {
+      res.status(502).json({ ok: false, error: `Upstream HTTP ${r.status}` });
+      return;
+    }
+    const text = await r.text();
+    res.type('text/plain; charset=utf-8').send(text);
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 /** Same payload as the WebSocket broadcast; use ?live=1 to force a fresh snapshot (slower). */
 app.get('/api/snapshot', async (req, res) => {
   try {
