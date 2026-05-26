@@ -199,15 +199,56 @@ function isPeplinkSessionHeader(line) {
   );
 }
 
-/** Pepwave/Peplink `get session` table: Dir Prot Src Dest Service Intf Idle */
-const PEPLINK_SESSION_LINE =
-  /^(In|Out)\s+(TCP|UDP|ICMP|IGMP|GRE|SCTP)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s*$/i;
+const PEPLINK_PROTOCOLS = new Set(['TCP', 'UDP', 'ICMP', 'IGMP', 'GRE', 'SCTP']);
 
 function parseHostPortSpec(spec) {
   const cell = String(spec || '').trim();
   const m = cell.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/);
   if (!m) return null;
   return parseIpv4PortToken(m[1], m[2]);
+}
+
+/**
+ * Parse one Peplink `get session` row (Dir Prot Src Dest [Service] Intf Idle).
+ * Service may be empty; Intf and Idle are always the last two tokens.
+ * @param {string} line
+ */
+function parsePeplinkSessionLine(line) {
+  const parts = String(line || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length < 6) return null;
+
+  const dir = parts[0].toLowerCase();
+  if (dir !== 'in' && dir !== 'out') return null;
+
+  const protocol = parts[1].toUpperCase();
+  if (!PEPLINK_PROTOCOLS.has(protocol)) return null;
+
+  const idleSec = Number(parts[parts.length - 1]);
+  if (!Number.isFinite(idleSec) || idleSec < 0) return null;
+
+  const intf = parts[parts.length - 2];
+  if (!intf) return null;
+
+  const src = parseHostPortSpec(parts[2]);
+  const dest = parseHostPortSpec(parts[3]);
+  if (!src || !dest) return null;
+
+  const serviceRaw = parts.slice(4, parts.length - 2).join(' ').trim();
+  const service =
+    serviceRaw && serviceRaw !== '-' && serviceRaw !== '—' ? serviceRaw : '';
+
+  return {
+    dir,
+    protocol,
+    src,
+    dest,
+    service,
+    intf,
+    idleSec,
+  };
 }
 
 /**
@@ -226,18 +267,10 @@ function parsePeplinkSessionTable(text) {
 
   for (const line of lines) {
     if (isPeplinkSessionHeader(line)) continue;
-    const m = line.match(PEPLINK_SESSION_LINE);
-    if (!m) continue;
+    const parsed = parsePeplinkSessionLine(line);
+    if (!parsed) continue;
 
-    const dir = String(m[1]).toLowerCase();
-    const protocol = String(m[2]).toUpperCase();
-    const src = parseHostPortSpec(m[3]);
-    const dest = parseHostPortSpec(m[4]);
-    const service = String(m[5] || '').trim();
-    const idleSec = Number(m[7]);
-
-    if (!src || !dest) continue;
-
+    const { dir, protocol, src, dest, service, idleSec } = parsed;
     const local = dir === 'in' ? dest : src;
     const remote = dir === 'in' ? src : dest;
 
@@ -423,6 +456,7 @@ async function fetchPepwaveConnectionRows(config) {
 
 module.exports = {
   DEFAULT_SSH_PORT,
+  parsePeplinkSessionLine,
   parsePeplinkSessionTable,
   parseGetSessionOutput,
   fetchPepwaveConnectionRows,

@@ -751,7 +751,8 @@ async function buildSnapshot() {
     const ra = String(row.RemoteAddress || '').trim();
     const rp = Number(row.RemotePort);
     if (!ra || ra === '::' || Number.isNaN(rp)) continue;
-    if (!isPublicRemote(ra)) continue;
+    const remoteIsPublic = isPublicRemote(ra);
+    if (!remoteIsPublic && connectionSource !== 'pepwave') continue;
 
     const tcpKey = arcKey(la, lp, ra, rp);
     if (seenConnKeys.has(tcpKey)) continue;
@@ -768,7 +769,7 @@ async function buildSnapshot() {
       protocol: 'TCP',
       createTime,
     });
-    remotePublic.add(ra);
+    if (remoteIsPublic) remotePublic.add(ra);
     if (isPublicRemote(la)) localsNeedingGeo.add(la);
   }
 
