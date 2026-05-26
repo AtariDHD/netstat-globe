@@ -577,6 +577,15 @@ body {
   border-color: #475569;
 }
 
+.settings-section .settings-checkbox-row {
+  display: flex;
+  margin: 0.55rem 0.35rem 0;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.25);
+}
+
 .settings-checkbox-row {
   display: inline-flex;
   align-items: center;
@@ -586,6 +595,11 @@ body {
   user-select: none;
   cursor: pointer;
   margin-top: 0.25rem;
+}
+
+.settings-select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .settings-checkbox-row input {

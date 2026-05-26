@@ -7,7 +7,7 @@ Real-time network connections on a 3D globe. A small Node.js server polls active
 ## Features
 
 - Live **TCP Established** connections + **UDP endpoints**
-- **3D globe** visualization with arcs; **Night** or **Day** earth texture (Settings)
+- **3D globe** visualization with arcs; **Real-time Day/Night**, static **Night**, or **Day** texture (Settings)
 - Connection **drawer** with **Live**, **History**, **Highlight Rules**, and **Settings** tabs
 - **Live search** across process, local, remote, remote host, from, and to — **Include** or **Exclude** mode (saved in the browser)
 - **Highlight & notification rules** — color matching arcs on the globe, a colored dot on matching live rows, optional browser notifications, and hover tooltips showing the rule label
@@ -45,7 +45,15 @@ When Pepwave is active, the HUD shows **router connections** instead of local co
 
 ### Globe theme
 
-Choose **Night** (default) or **Day** for the globe texture. The choice is saved in your browser.
+In **Settings → Globe Theme**, pick one of:
+
+| Theme | Description |
+|-------|-------------|
+| **Real-time Day/Night** (default) | Blends day and night earth textures with a terminator that follows the actual time of day and updates as you rotate the globe |
+| **Night** | Static night-side earth texture |
+| **Day** | Static day-side earth texture (blue marble) |
+
+The choice is saved in your browser (`localStorage`). If the real-time shader fails to load (network or WebGL), the app falls back to **Night**.
 
 ### Update frequency
 

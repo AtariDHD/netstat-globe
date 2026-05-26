@@ -15,10 +15,69 @@
   const LS_SORT_DIR = 'netstatGlobeTableSortDir';
   const LS_POV = 'netstatGlobePov';
   const LS_GLOBE_THEME = 'netstatGlobeGlobeTheme';
+  /** @deprecated migrated to LS_GLOBE_THEME value `realtime` */
+  const LS_GLOBE_DAY_NIGHT_LEGACY = 'netstatGlobeGlobeDayNight';
+  const GLOBE_THEME_REALTIME = 'realtime';
 
   const GLOBE_THEMES = {
     night: '//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg',
     day: '//cdn.jsdelivr.net/npm/three-globe/example/img/earth-blue-marble.jpg',
+  };
+
+  const GLOBE_DAY_NIGHT_SHADER = {
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec2 vUv;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      #define PI 3.141592653589793
+      uniform sampler2D dayTexture;
+      uniform sampler2D nightTexture;
+      uniform vec2 sunPosition;
+      uniform vec2 globeRotation;
+      varying vec3 vNormal;
+      varying vec2 vUv;
+
+      float toRad(in float a) {
+        return a * PI / 180.0;
+      }
+
+      vec3 Polar2Cartesian(in vec2 c) {
+        float theta = toRad(90.0 - c.x);
+        float phi = toRad(90.0 - c.y);
+        return vec3(
+          sin(phi) * cos(theta),
+          cos(phi),
+          sin(phi) * sin(theta)
+        );
+      }
+
+      void main() {
+        float invLon = toRad(globeRotation.x);
+        float invLat = -toRad(globeRotation.y);
+        mat3 rotX = mat3(
+          1, 0, 0,
+          0, cos(invLat), -sin(invLat),
+          0, sin(invLat), cos(invLat)
+        );
+        mat3 rotY = mat3(
+          cos(invLon), 0, sin(invLon),
+          0, 1, 0,
+          -sin(invLon), 0, cos(invLon)
+        );
+        vec3 rotatedSunDirection = rotX * rotY * Polar2Cartesian(sunPosition);
+        float intensity = dot(normalize(vNormal), normalize(rotatedSunDirection));
+        vec4 dayColor = texture2D(dayTexture, vUv);
+        vec4 nightColor = texture2D(nightTexture, vUv);
+        float blendFactor = smoothstep(-0.1, 0.1, intensity);
+        gl_FragColor = mix(nightColor, dayColor, blendFactor);
+      }
+    `,
   };
   const DEFAULT_POV = { lat: 39.6, lng: -98.5, altitude: 2 };
   const LS_POLL_MS = 'netstatGlobePollMs';
@@ -200,40 +259,200 @@
     return stub;
   }
 
+  function normalizeGlobeTheme(theme) {
+    if (theme === GLOBE_THEME_REALTIME || theme === 'day' || theme === 'night') return theme;
+    return GLOBE_THEME_REALTIME;
+  }
+
   function loadGlobeTheme() {
     try {
-      const v = localStorage.getItem(LS_GLOBE_THEME);
-      return v === 'day' ? 'day' : 'night';
+      if (localStorage.getItem(LS_GLOBE_DAY_NIGHT_LEGACY) === '1') {
+        localStorage.removeItem(LS_GLOBE_DAY_NIGHT_LEGACY);
+        localStorage.setItem(LS_GLOBE_THEME, GLOBE_THEME_REALTIME);
+        return GLOBE_THEME_REALTIME;
+      }
+      return normalizeGlobeTheme(localStorage.getItem(LS_GLOBE_THEME));
     } catch {
-      return 'night';
+      return GLOBE_THEME_REALTIME;
     }
   }
 
   function saveGlobeTheme(theme) {
     try {
-      localStorage.setItem(LS_GLOBE_THEME, theme === 'day' ? 'day' : 'night');
+      localStorage.setItem(LS_GLOBE_THEME, normalizeGlobeTheme(theme));
     } catch {
       /* ignore */
     }
   }
 
   function globeImageUrlForTheme(theme) {
-    return GLOBE_THEMES[theme === 'day' ? 'day' : 'night'] || GLOBE_THEMES.night;
+    const t = normalizeGlobeTheme(theme);
+    if (t === 'day') return GLOBE_THEMES.day;
+    return GLOBE_THEMES.night;
   }
 
-  function applyGlobeTheme(theme) {
+  let currentGlobeTheme = loadGlobeTheme();
+  let globeDayNightMaterial = null;
+  let globeDayNightStopRaf = null;
+  let globeDayNightModulesPromise = null;
+  let globeDayNightEnabling = false;
+  let globeRealtimeLoadId = 0;
+
+  function sunPosAt(dt, solar) {
+    const day = new Date(+dt).setUTCHours(0, 0, 0, 0);
+    const t = solar.century(dt);
+    const longitude = ((day - dt) / 864e5) * 360 - 180;
+    return [longitude - solar.equationOfTime(t) / 4, solar.declination(t)];
+  }
+
+  function syncGlobeDayNightRotationUniform() {
+    if (!globeDayNightMaterial) return;
+    try {
+      const pov = world.pointOfView();
+      if (pov && Number.isFinite(pov.lng) && Number.isFinite(pov.lat)) {
+        globeDayNightMaterial.uniforms.globeRotation.value.set(pov.lng, pov.lat);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function stopGlobeDayNightAnimation() {
+    if (globeDayNightStopRaf) {
+      globeDayNightStopRaf();
+      globeDayNightStopRaf = null;
+    }
+  }
+
+  function startGlobeDayNightAnimation(material, solar) {
+    stopGlobeDayNightAnimation();
+    let rafId = 0;
+    const tick = () => {
+      if (!globeDayNightMaterial || globeDayNightMaterial !== material) return;
+      const dt = Date.now();
+      material.uniforms.sunPosition.value.set(...sunPosAt(dt, solar));
+      rafId = requestAnimationFrame(tick);
+    };
+    material.uniforms.sunPosition.value.set(...sunPosAt(Date.now(), solar));
+    rafId = requestAnimationFrame(tick);
+    globeDayNightStopRaf = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+    };
+  }
+
+  function loadGlobeDayNightModules() {
+    if (!globeDayNightModulesPromise) {
+      globeDayNightModulesPromise = Promise.all([
+        import('https://esm.sh/three@0.180.0'),
+        import('https://esm.sh/solar-calculator@0.3'),
+      ]).then(([threeMod, solarMod]) => ({
+        TextureLoader: threeMod.TextureLoader,
+        ShaderMaterial: threeMod.ShaderMaterial,
+        Vector2: threeMod.Vector2,
+        solar: solarMod,
+      }));
+    }
+    return globeDayNightModulesPromise;
+  }
+
+  function disposeGlobeDayNightMaterial() {
+    stopGlobeDayNightAnimation();
+    if (!globeDayNightMaterial) return;
+    const uniforms = globeDayNightMaterial.uniforms;
+    if (uniforms) {
+      if (uniforms.dayTexture && uniforms.dayTexture.value) uniforms.dayTexture.value.dispose();
+      if (uniforms.nightTexture && uniforms.nightTexture.value) uniforms.nightTexture.value.dispose();
+    }
+    globeDayNightMaterial.dispose();
+    globeDayNightMaterial = null;
+  }
+
+  function applyStaticGlobeTheme(theme) {
     if (!webGLSupported || !world) return;
     const url = globeImageUrlForTheme(theme);
+    // globeMaterial(shader) replaces the default; globeImageUrl alone won't show static textures.
+    if (typeof world.globeMaterial === 'function') {
+      world.globeMaterial(null);
+    }
     if (typeof world.globeImageUrl === 'function') {
+      world.globeImageUrl(null);
       world.globeImageUrl(url);
+    }
+  }
+
+  function enableGlobeRealtimeShader() {
+    if (!webGLSupported || globeDayNightEnabling) return Promise.resolve();
+    const loadId = ++globeRealtimeLoadId;
+    globeDayNightEnabling = true;
+    return loadGlobeDayNightModules()
+      .then(({ TextureLoader, ShaderMaterial, Vector2, solar }) => {
+        if (loadId !== globeRealtimeLoadId || currentGlobeTheme !== GLOBE_THEME_REALTIME) return;
+        disposeGlobeDayNightMaterial();
+        const loader = new TextureLoader();
+        return Promise.all([
+          loader.loadAsync(GLOBE_THEMES.day),
+          loader.loadAsync(GLOBE_THEMES.night),
+        ]).then(([dayTexture, nightTexture]) => {
+          if (loadId !== globeRealtimeLoadId || currentGlobeTheme !== GLOBE_THEME_REALTIME) {
+            dayTexture.dispose();
+            nightTexture.dispose();
+            return;
+          }
+          const material = new ShaderMaterial({
+            uniforms: {
+              dayTexture: { value: dayTexture },
+              nightTexture: { value: nightTexture },
+              sunPosition: { value: new Vector2() },
+              globeRotation: { value: new Vector2() },
+            },
+            vertexShader: GLOBE_DAY_NIGHT_SHADER.vertexShader,
+            fragmentShader: GLOBE_DAY_NIGHT_SHADER.fragmentShader,
+          });
+          globeDayNightMaterial = material;
+          if (typeof world.globeMaterial === 'function') {
+            world.globeMaterial(material);
+          }
+          syncGlobeDayNightRotationUniform();
+          startGlobeDayNightAnimation(material, solar);
+        });
+      })
+      .catch((err) => {
+        console.error('Globe day/night shader failed to load', err);
+        currentGlobeTheme = 'night';
+        saveGlobeTheme('night');
+        const sel = document.getElementById('globe-theme');
+        if (sel instanceof HTMLSelectElement) sel.value = 'night';
+        syncGlobeAppearance('night');
+      })
+      .finally(() => {
+        globeDayNightEnabling = false;
+      });
+  }
+
+  function syncGlobeAppearance(theme) {
+    const next = normalizeGlobeTheme(theme ?? loadGlobeTheme());
+    currentGlobeTheme = next;
+    if (!webGLSupported) return;
+    if (next !== GLOBE_THEME_REALTIME) {
+      globeRealtimeLoadId += 1;
+    }
+    if (next === GLOBE_THEME_REALTIME) {
+      enableGlobeRealtimeShader();
+    } else {
+      disposeGlobeDayNightMaterial();
+      applyStaticGlobeTheme(next);
     }
   }
 
   const webGLSupported = hasWebGLSupport();
   const initialGlobeTheme = loadGlobeTheme();
+  currentGlobeTheme = initialGlobeTheme;
   const world = webGLSupported
     ? new Globe(globeEl)
-        .globeImageUrl(globeImageUrlForTheme(initialGlobeTheme))
+        .globeImageUrl(
+          globeImageUrlForTheme(initialGlobeTheme === GLOBE_THEME_REALTIME ? 'night' : initialGlobeTheme)
+        )
         .arcLabel('label')
         .arcDashLength(1)
         // arcColor / arcStroke set in syncArcStylesAndData() for hover highlighting
@@ -295,6 +514,9 @@
   if (typeof world.onZoom === 'function') {
     world.onZoom((pov) => {
       schedulePovSave(pov);
+      if (globeDayNightMaterial && pov && Number.isFinite(pov.lng) && Number.isFinite(pov.lat)) {
+        globeDayNightMaterial.uniforms.globeRotation.value.set(pov.lng, pov.lat);
+      }
     });
   }
 
@@ -2789,9 +3011,9 @@
     const theme = loadGlobeTheme();
     sel.value = theme;
     sel.addEventListener('change', () => {
-      const next = sel.value === 'day' ? 'day' : 'night';
+      const next = normalizeGlobeTheme(sel.value);
       saveGlobeTheme(next);
-      applyGlobeTheme(next);
+      syncGlobeAppearance(next);
     });
   }
 
@@ -3004,6 +3226,9 @@
   layoutGlobe();
 
   world.pointOfView(loadSavedPov() || DEFAULT_POV, 0);
+  if (currentGlobeTheme === GLOBE_THEME_REALTIME) {
+    syncGlobeAppearance(GLOBE_THEME_REALTIME);
+  }
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       povPersistenceReady = true;
