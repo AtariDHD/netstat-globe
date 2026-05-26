@@ -7,7 +7,7 @@ Real-time network connections on a 3D globe. A small Node.js server polls active
 ## Features
 
 - Live **TCP Established** connections + **UDP endpoints**
-- **3D globe** visualization with arcs; **Real-time Day/Night**, static **Night**, or **Day** texture (Settings)
+- **3D globe** visualization with arcs; **Real-time Day/Night**, static **Night** or **Day**, or **Zoomable Administrative Boundaries** map tiles (Settings)
 - Connection **drawer** with **Live**, **History**, **Highlight Rules**, and **Settings** tabs
 - **Live search** across process, local, remote, remote host, from, and to — **Include** or **Exclude** mode (saved in the browser)
 - **Highlight & notification rules** — color matching arcs on the globe, a colored dot on matching live rows, optional browser notifications, and hover tooltips showing the rule label
@@ -52,8 +52,9 @@ In **Settings → Globe Theme**, pick one of:
 | **Real-time Day/Night** (default) | Blends day and night earth textures with a terminator that follows the actual time of day and updates as you rotate the globe |
 | **Night** | Static night-side earth texture |
 | **Day** | Static day-side earth texture (blue marble) |
+| **Zoomable Administrative Boundaries** | Slippy map tiles (OpenStreetMap) on the globe; country and regional detail increases as you zoom in |
 
-The choice is saved in your browser (`localStorage`). If the real-time shader fails to load (network or WebGL), the app falls back to **Night**.
+The choice is saved in your browser (`localStorage`). If the real-time shader fails to load (network or WebGL), the app falls back to **Night**. The boundaries theme loads tiles from [OpenStreetMap](https://www.openstreetmap.org/copyright); use responsibly per their [tile usage policy](https://operations.osmfoundation.org/policies/tiles/).
 
 ### Update frequency
 

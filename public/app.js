@@ -18,6 +18,10 @@
   /** @deprecated migrated to LS_GLOBE_THEME value `realtime` */
   const LS_GLOBE_DAY_NIGHT_LEGACY = 'netstatGlobeGlobeDayNight';
   const GLOBE_THEME_REALTIME = 'realtime';
+  const GLOBE_THEME_BOUNDARIES = 'boundaries';
+
+  const GLOBE_TILE_ENGINE_URL = (x, y, l) =>
+    `https://tile.openstreetmap.org/${l}/${x}/${y}.png`;
 
   const GLOBE_THEMES = {
     night: '//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg',
@@ -260,7 +264,14 @@
   }
 
   function normalizeGlobeTheme(theme) {
-    if (theme === GLOBE_THEME_REALTIME || theme === 'day' || theme === 'night') return theme;
+    if (
+      theme === GLOBE_THEME_REALTIME ||
+      theme === GLOBE_THEME_BOUNDARIES ||
+      theme === 'day' ||
+      theme === 'night'
+    ) {
+      return theme;
+    }
     return GLOBE_THEME_REALTIME;
   }
 
@@ -368,8 +379,19 @@
     globeDayNightMaterial = null;
   }
 
+  function disableGlobeTileEngine() {
+    if (!world) return;
+    if (typeof world.globeTileEngineClearCache === 'function') {
+      world.globeTileEngineClearCache();
+    }
+    if (typeof world.globeTileEngineUrl === 'function') {
+      world.globeTileEngineUrl(null);
+    }
+  }
+
   function applyStaticGlobeTheme(theme) {
     if (!webGLSupported || !world) return;
+    disableGlobeTileEngine();
     const url = globeImageUrlForTheme(theme);
     // globeMaterial(shader) replaces the default; globeImageUrl alone won't show static textures.
     if (typeof world.globeMaterial === 'function') {
@@ -381,10 +403,25 @@
     }
   }
 
+  function applyBoundariesGlobeTheme() {
+    if (!webGLSupported || !world) return;
+    if (typeof world.globeMaterial === 'function') {
+      world.globeMaterial(null);
+    }
+    disableGlobeTileEngine();
+    if (typeof world.globeImageUrl === 'function') {
+      world.globeImageUrl(null);
+    }
+    if (typeof world.globeTileEngineUrl === 'function') {
+      world.globeTileEngineUrl(GLOBE_TILE_ENGINE_URL);
+    }
+  }
+
   function enableGlobeRealtimeShader() {
     if (!webGLSupported || globeDayNightEnabling) return Promise.resolve();
     const loadId = ++globeRealtimeLoadId;
     globeDayNightEnabling = true;
+    disableGlobeTileEngine();
     return loadGlobeDayNightModules()
       .then(({ TextureLoader, ShaderMaterial, Vector2, solar }) => {
         if (loadId !== globeRealtimeLoadId || currentGlobeTheme !== GLOBE_THEME_REALTIME) return;
@@ -439,6 +476,9 @@
     }
     if (next === GLOBE_THEME_REALTIME) {
       enableGlobeRealtimeShader();
+    } else if (next === GLOBE_THEME_BOUNDARIES) {
+      disposeGlobeDayNightMaterial();
+      applyBoundariesGlobeTheme();
     } else {
       disposeGlobeDayNightMaterial();
       applyStaticGlobeTheme(next);
@@ -451,7 +491,11 @@
   const world = webGLSupported
     ? new Globe(globeEl)
         .globeImageUrl(
-          globeImageUrlForTheme(initialGlobeTheme === GLOBE_THEME_REALTIME ? 'night' : initialGlobeTheme)
+          initialGlobeTheme === GLOBE_THEME_BOUNDARIES
+            ? null
+            : globeImageUrlForTheme(
+                initialGlobeTheme === GLOBE_THEME_REALTIME ? 'night' : initialGlobeTheme
+              )
         )
         .arcLabel('label')
         .arcDashLength(1)
@@ -3226,8 +3270,11 @@
   layoutGlobe();
 
   world.pointOfView(loadSavedPov() || DEFAULT_POV, 0);
-  if (currentGlobeTheme === GLOBE_THEME_REALTIME) {
-    syncGlobeAppearance(GLOBE_THEME_REALTIME);
+  if (
+    currentGlobeTheme === GLOBE_THEME_REALTIME ||
+    currentGlobeTheme === GLOBE_THEME_BOUNDARIES
+  ) {
+    syncGlobeAppearance(currentGlobeTheme);
   }
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
