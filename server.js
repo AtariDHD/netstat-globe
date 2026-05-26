@@ -9,6 +9,7 @@ const dns = require('dns').promises;
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { execFile } = require('child_process');
+const { fetchPepwaveConnectionRows } = require('./pepwave');
 
 const PORT = Number(process.env.PORT) || 3847;
 
@@ -25,6 +26,47 @@ function normalizePollMs(ms) {
 }
 
 let currentPollMs = normalizePollMs(process.env.POLL_MS || 3000);
+
+/** @type {'local' | 'pepwave'} */
+let connectionSource = 'local';
+/** @type {{ host: string, username: string, password: string, sshPort?: number } | null} */
+let pepwaveConfig = null;
+
+function normalizeConnectionSource(v) {
+  return v === 'pepwave' ? 'pepwave' : 'local';
+}
+
+function applyConnectionSource(source, config) {
+  connectionSource = normalizeConnectionSource(source);
+  if (connectionSource === 'pepwave' && config && typeof config === 'object') {
+    const host = config.host != null ? String(config.host).trim() : '';
+    const username = config.username != null ? String(config.username) : '';
+    const password = config.password != null ? String(config.password) : '';
+    if (!host || !username) {
+      pepwaveConfig = null;
+      connectionSource = 'local';
+      return;
+    }
+    let sshPort = Number(config.sshPort);
+    if (!Number.isFinite(sshPort) || sshPort <= 0) sshPort = 8822;
+    pepwaveConfig = {
+      host,
+      username,
+      password,
+      sshPort,
+    };
+  } else {
+    pepwaveConfig = null;
+    if (connectionSource === 'pepwave') connectionSource = 'local';
+  }
+}
+
+async function runConnectionSourceQuery() {
+  if (connectionSource === 'pepwave' && pepwaveConfig) {
+    return fetchPepwaveConnectionRows(pepwaveConfig);
+  }
+  return runNetConnections();
+}
 
 const IP_API_BATCH =
   'http://ip-api.com/batch?fields=status,message,country,countryCode,lat,lon,query,city,regionName';
@@ -629,7 +671,7 @@ async function buildSnapshot() {
 
   let rows;
   try {
-    rows = await runNetConnections();
+    rows = await runConnectionSourceQuery();
   } catch (e) {
     return {
       error: String(e.message || e),
@@ -791,6 +833,7 @@ async function buildSnapshot() {
     connections,
     userGeo,
     updatedAt: Date.now(),
+    connectionSource,
   };
 }
 
@@ -944,7 +987,11 @@ async function broadcast() {
 }
 
 function broadcastPollConfig() {
-  const cfg = JSON.stringify({ type: 'config', pollMs: currentPollMs });
+  const cfg = JSON.stringify({
+    type: 'config',
+    pollMs: currentPollMs,
+    connectionSource,
+  });
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(cfg);
   }
@@ -967,7 +1014,9 @@ function applyPollMs(ms) {
 }
 
 wss.on('connection', (ws) => {
-  ws.send(JSON.stringify({ type: 'config', pollMs: currentPollMs }));
+  ws.send(
+    JSON.stringify({ type: 'config', pollMs: currentPollMs, connectionSource })
+  );
 
   if (lastSnapshot) {
     ws.send(JSON.stringify(lastSnapshot));
@@ -978,6 +1027,12 @@ wss.on('connection', (ws) => {
       const msg = JSON.parse(String(raw || ''));
       if (msg && msg.type === 'setPollMs' && msg.ms != null) {
         applyPollMs(msg.ms);
+        return;
+      }
+      if (msg && msg.type === 'setConnectionSource') {
+        applyConnectionSource(msg.source, msg.pepwave);
+        broadcastPollConfig();
+        broadcast().catch(() => {});
       }
     } catch {
       /* ignore */

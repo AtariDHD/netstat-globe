@@ -26,7 +26,7 @@
 
       <aside id="drawer" class="drawer" data-open="false" aria-label="Connections drawer">
       <button type="button" id="drawer-tab" class="drawer-tab" aria-expanded="false" aria-controls="drawer-panel" title="Show connections">
-        <span class="drawer-tab-text">Connections</span>
+        <span class="drawer-tab-text">Connections + Settings</span>
       </button>
       <div id="drawer-panel" class="drawer-panel">
         <div class="drawer-resize" role="separator" aria-orientation="vertical" aria-label="Resize connections panel" tabindex="0"></div>
@@ -63,6 +63,17 @@
                 type="button"
                 class="panel-tab"
                 role="tab"
+                id="tab-highlight-rules"
+                aria-selected="false"
+                aria-controls="panel-highlight-rules"
+                tabindex="-1"
+              >
+                Highlight Rules
+              </button>
+              <button
+                type="button"
+                class="panel-tab"
+                role="tab"
                 id="tab-settings"
                 aria-selected="false"
                 aria-controls="panel-settings"
@@ -73,20 +84,19 @@
             </div>
             <div id="panel-live" class="tab-panel" role="tabpanel" aria-labelledby="tab-live">
               <div class="table-toolbar table-toolbar-live">
-                <div class="protocol-filter" role="group" aria-label="Filter by protocol">
+                <label class="protocol-filter" for="live-protocol-filter">
                   <span class="protocol-filter-label">Show</span>
-                  <label class="protocol-filter-option"
-                    ><input type="radio" name="live-protocol-filter" value="tcp" /> TCP</label
-                  >
-                  <label class="protocol-filter-option"
-                    ><input type="radio" name="live-protocol-filter" value="udp" /> UDP</label
-                  >
-                  <label class="protocol-filter-option"
-                    ><input type="radio" name="live-protocol-filter" value="both" /> Both TCP &amp; UDP</label
-                  >
-                </div>
+                  <select id="live-protocol-filter" class="protocol-filter-select" aria-label="Filter live connections by protocol">
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                    <option value="both">Both TCP &amp; UDP</option>
+                  </select>
+                </label>
                 <label class="live-search-label" for="live-connections-search">
-                  <span class="live-search-label-text">Search</span>
+                  <select id="live-search-mode" class="protocol-filter-select live-search-mode-select" aria-label="Search include or exclude">
+                    <option value="include">Include</option>
+                    <option value="exclude">Exclude</option>
+                  </select>
                   <input
                     type="search"
                     id="live-connections-search"
@@ -122,21 +132,14 @@
             </div>
             <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
               <div class="table-toolbar history-toolbar">
-                <div class="protocol-filter" role="group" aria-label="Filter history by protocol">
+                <label class="protocol-filter" for="history-protocol-filter">
                   <span class="protocol-filter-label">Show</span>
-                  <label class="protocol-filter-option"
-                    ><input type="radio" name="history-protocol-filter" value="tcp" /> TCP</label
-                  >
-                  <label class="protocol-filter-option"
-                    ><input type="radio" name="history-protocol-filter" value="udp" /> UDP</label
-                  >
-                  <label class="protocol-filter-option"
-                    ><input type="radio" name="history-protocol-filter" value="both" /> Both TCP &amp; UDP</label
-                  >
-                </div>
-                <button type="button" id="history-choose-columns" class="choose-columns-btn">
-                  Choose columns
-                </button>
+                  <select id="history-protocol-filter" class="protocol-filter-select" aria-label="Filter history by protocol">
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                    <option value="both">Both TCP &amp; UDP</option>
+                  </select>
+                </label>
                 <div class="history-toolbar-right">
                   <label class="history-max-label">
                     <span>Keep up to</span>
@@ -145,6 +148,9 @@
                   </label>
                   <button type="button" id="history-clear" class="history-clear-btn">Clear</button>
                 </div>
+                <button type="button" id="history-choose-columns" class="choose-columns-btn">
+                  Choose columns
+                </button>
               </div>
               <table id="history-connections-table" class="connections-table">
                 <thead>
@@ -164,9 +170,126 @@
                 <tbody id="history-tbody"></tbody>
               </table>
             </div>
+            <div id="panel-highlight-rules" class="tab-panel" role="tabpanel" aria-labelledby="tab-highlight-rules" hidden>
+              <div class="settings-section">
+                <h3 class="settings-title">Highlight &amp; Notification Rules</h3>
+                <p class="settings-help">
+                  Rules highlight matching arcs on the globe and show a colored dot in the live connections list.
+                  Browser notifications are only sent when a new matching connection appears.
+                </p>
+                <div class="rule-sets-toolbar">
+                  <label class="settings-field rule-sets-field">
+                    <span class="settings-field-label">Active rule set</span>
+                    <select id="rule-set-active" class="settings-select" aria-label="Active rule set">
+                      <option value="">— None —</option>
+                    </select>
+                  </label>
+                  <label class="settings-field rule-sets-field">
+                    <span class="settings-field-label">Set name</span>
+                    <input
+                      id="rule-set-name"
+                      class="settings-input"
+                      type="text"
+                      placeholder="Name for this rule set"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <div class="rule-sets-actions">
+                    <button type="button" id="rule-set-save" class="settings-add-btn">Save set</button>
+                    <button type="button" id="rule-set-delete" class="choose-columns-secondary rule-set-delete-btn">
+                      Delete set
+                    </button>
+                  </div>
+                </div>
+                <p id="rule-sets-status" class="settings-help settings-rule-sets-status" hidden></p>
+                <p id="settings-rules-empty" class="settings-help settings-rules-empty" hidden>
+                  No rules yet. Click <strong>Add rule</strong> below to create one.
+                </p>
+                <div id="settings-rules" class="settings-rules"></div>
+                <div class="settings-actions">
+                  <button type="button" id="settings-add-rule" class="settings-add-btn">Add rule</button>
+                </div>
+                <p id="settings-notification-status" class="settings-help settings-notification-status" hidden></p>
+              </div>
+            </div>
             <div id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-settings" hidden>
               <div class="settings-section">
-                <h3 class="settings-title">Update frequency</h3>
+                <h3 class="settings-title">Connection Source</h3>
+                <p class="settings-help">
+                  <strong>Local</strong> reads connections on this computer. <strong>Pepwave</strong> runs
+                  <code>get session</code> over SSH to list the router&apos;s active NAT sessions. Enable
+                  <em>System → Admin Security → CLI SSH</em> (default port 8822). Use your local admin login (not
+                  InControl 2).
+                </p>
+                <label class="settings-row" for="connection-source">
+                  <span class="settings-label">Source</span>
+                  <select id="connection-source" class="settings-select" aria-label="Connection data source">
+                    <option value="local" selected>Local Machine</option>
+                    <option value="pepwave">Pepwave Router</option>
+                  </select>
+                </label>
+                <div id="pepwave-settings" class="pepwave-settings" hidden>
+                  <label class="settings-field settings-field-wide">
+                    <span class="settings-field-label">Router address</span>
+                    <input
+                      id="pepwave-host"
+                      class="settings-input"
+                      type="text"
+                      placeholder="e.g. 192.168.50.1 or router.local"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <label class="settings-field settings-field-wide">
+                    <span class="settings-field-label">Username</span>
+                    <input
+                      id="pepwave-username"
+                      class="settings-input"
+                      type="text"
+                      placeholder="Local admin username"
+                      autocomplete="username"
+                    />
+                  </label>
+                  <label class="settings-field settings-field-wide">
+                    <span class="settings-field-label">Password</span>
+                    <input
+                      id="pepwave-password"
+                      class="settings-input"
+                      type="password"
+                      placeholder="Local admin password"
+                      autocomplete="current-password"
+                    />
+                  </label>
+                  <label class="settings-field settings-field-wide">
+                    <span class="settings-field-label">SSH port</span>
+                    <input
+                      id="pepwave-ssh-port"
+                      class="settings-input"
+                      type="number"
+                      min="1"
+                      max="65535"
+                      step="1"
+                      value="8822"
+                      placeholder="8822"
+                    />
+                  </label>
+                </div>
+                <p id="pepwave-settings-status" class="settings-help settings-connection-status" hidden></p>
+              </div>
+
+              <div class="settings-section">
+                <h3 class="settings-title">Globe Theme</h3>
+                <label class="settings-row" for="globe-theme">
+                  <span class="settings-label">Theme</span>
+                  <select id="globe-theme" class="settings-select" aria-label="Globe texture theme">
+                    <option value="night" selected>Night</option>
+                    <option value="day">Day</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="settings-section">
+                <h3 class="settings-title">Update Frequency</h3>
                 <label class="settings-row" for="poll-interval">
                   <span class="settings-label">Update every</span>
                   <select id="poll-interval" class="settings-select" title="How often to refresh connections from the server" aria-label="Update interval">
@@ -179,19 +302,6 @@
                     <option value="30000">30 s</option>
                   </select>
                 </label>
-              </div>
-
-              <div class="settings-section">
-                <h3 class="settings-title">Highlight &amp; notification rules</h3>
-                <p class="settings-help">
-                  Rules highlight matching arcs on the globe and show a colored dot in the live connections list.
-                  Browser notifications are only sent when a new matching connection appears.
-                </p>
-                <div id="settings-rules" class="settings-rules"></div>
-                <div class="settings-actions">
-                  <button type="button" id="settings-add-rule" class="settings-add-btn">Add rule</button>
-                </div>
-                <p id="settings-notification-status" class="settings-help settings-notification-status" hidden></p>
               </div>
             </div>
           </div>

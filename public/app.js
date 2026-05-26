@@ -14,6 +14,12 @@
   const LS_SORT_KEY = 'netstatGlobeTableSortKey';
   const LS_SORT_DIR = 'netstatGlobeTableSortDir';
   const LS_POV = 'netstatGlobePov';
+  const LS_GLOBE_THEME = 'netstatGlobeGlobeTheme';
+
+  const GLOBE_THEMES = {
+    night: '//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg',
+    day: '//cdn.jsdelivr.net/npm/three-globe/example/img/earth-blue-marble.jpg',
+  };
   const DEFAULT_POV = { lat: 39.6, lng: -98.5, altitude: 2 };
   const LS_POLL_MS = 'netstatGlobePollMs';
   const POLL_MS_OPTIONS = [500, 1000, 2000, 3000, 5000, 10000, 30000];
@@ -34,9 +40,13 @@
   const LS_HISTORY_SORT_DIR = 'netstatGlobeHistorySortDir';
   const LS_DRAWER_TAB = 'netstatGlobeDrawerTab';
   const LS_HIGHLIGHT_RULES = 'netstatGlobeHighlightRules';
+  const LS_HIGHLIGHT_RULE_SETS = 'netstatGlobeHighlightRuleSets';
   const LS_PROTOCOL_FILTER_LIVE = 'netstatGlobeProtocolFilterLive';
   const LS_PROTOCOL_FILTER_HISTORY = 'netstatGlobeProtocolFilterHistory';
   const LS_LIVE_SEARCH = 'netstatGlobeLiveSearch';
+  const LS_LIVE_SEARCH_MODE = 'netstatGlobeLiveSearchMode';
+  const LS_CONNECTION_SOURCE = 'netstatGlobeConnectionSource';
+  const LS_PEPWAVE_CONFIG = 'netstatGlobePepwaveConfig';
   const LIVE_SEARCH_COLS = ['process', 'local', 'remote', 'remoteHost', 'from', 'to'];
   const TABLE_HISTORY_SORT_IDS = [
     'time',
@@ -190,10 +200,40 @@
     return stub;
   }
 
+  function loadGlobeTheme() {
+    try {
+      const v = localStorage.getItem(LS_GLOBE_THEME);
+      return v === 'day' ? 'day' : 'night';
+    } catch {
+      return 'night';
+    }
+  }
+
+  function saveGlobeTheme(theme) {
+    try {
+      localStorage.setItem(LS_GLOBE_THEME, theme === 'day' ? 'day' : 'night');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function globeImageUrlForTheme(theme) {
+    return GLOBE_THEMES[theme === 'day' ? 'day' : 'night'] || GLOBE_THEMES.night;
+  }
+
+  function applyGlobeTheme(theme) {
+    if (!webGLSupported || !world) return;
+    const url = globeImageUrlForTheme(theme);
+    if (typeof world.globeImageUrl === 'function') {
+      world.globeImageUrl(url);
+    }
+  }
+
   const webGLSupported = hasWebGLSupport();
+  const initialGlobeTheme = loadGlobeTheme();
   const world = webGLSupported
     ? new Globe(globeEl)
-        .globeImageUrl('//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg')
+        .globeImageUrl(globeImageUrlForTheme(initialGlobeTheme))
         .arcLabel('label')
         .arcDashLength(1)
         // arcColor / arcStroke set in syncArcStylesAndData() for hover highlighting
@@ -293,6 +333,7 @@
   const NOTIFY_THROTTLE_MS = 10000;
 
   const FILTER_BY_OPTIONS = [
+    { id: 'localIp', label: 'Local IP address' },
     { id: 'remoteIp', label: 'Remote IP address' },
     { id: 'remoteHostname', label: 'Remote hostname' },
     { id: 'remoteLocation', label: 'Remote location' },
@@ -319,7 +360,9 @@
 
   /** @type {Array<{ id: string, label: string, filterBy: string, useRegex?: boolean, filter: string, color: string, notification: string }>} */
   let highlightRules = [];
-  /** @type {Map<string, { color: string, ruleId: string }>} */
+  /** @type {{ activeSetId: string|null, sets: Record<string, { id: string, name: string, rules: object[] }>, unsavedRules: object[]|null }} */
+  let ruleSetsState = { activeSetId: null, sets: {}, unsavedRules: null };
+  /** @type {Map<string, { color: string, ruleId: string, ruleLabel: string }>} */
   let matchStyleByConnectionKey = new Map();
   /** @type {{ lastSentAt: number, timer: any, pendingByRuleId: Map<string, number> }} */
   const notifyAgg = { lastSentAt: 0, timer: null, pendingByRuleId: new Map() };
@@ -344,38 +387,271 @@
     };
   }
 
-  function loadHighlightRules() {
-    try {
-      const raw = localStorage.getItem(LS_HIGHLIGHT_RULES);
-      if (!raw) return [defaultRule()];
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return [defaultRule()];
-      const out = [];
-      for (const r of arr) {
-        if (!r || typeof r !== 'object') continue;
-        const id = typeof r.id === 'string' && r.id ? r.id : safeRandomId();
-        const label = r.label != null ? String(r.label) : '';
-        const rawFilterBy = r.filterBy === 'remoteIpRange' ? 'remoteIp' : r.filterBy;
-        const filterBy = FILTER_BY_OPTIONS.some((o) => o.id === rawFilterBy)
-          ? rawFilterBy
-          : 'remoteHostname';
-        const filter = r.filter != null ? String(r.filter) : '';
-        const color = typeof r.color === 'string' && r.color ? r.color : '#22c55e';
-        const notification = NOTIFICATION_OPTIONS.some((o) => o.id === r.notification) ? r.notification : 'disabled';
-        out.push({ id, label, filterBy, filter, color, notification });
-      }
-      return out.length ? out : [defaultRule()];
-    } catch {
-      return [defaultRule()];
-    }
+  function normalizeRule(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const id = typeof raw.id === 'string' && raw.id ? raw.id : safeRandomId();
+    const label = raw.label != null ? String(raw.label) : '';
+    const rawFilterBy = raw.filterBy === 'remoteIpRange' ? 'remoteIp' : raw.filterBy;
+    const filterBy = FILTER_BY_OPTIONS.some((o) => o.id === rawFilterBy) ? rawFilterBy : 'remoteHostname';
+    const filter = raw.filter != null ? String(raw.filter) : '';
+    const color = typeof raw.color === 'string' && raw.color ? raw.color : '#22c55e';
+    const notification = NOTIFICATION_OPTIONS.some((o) => o.id === raw.notification) ? raw.notification : 'disabled';
+    return { id, label, filterBy, filter, color, notification };
   }
 
-  function saveHighlightRules() {
+  function normalizeRulesArray(arr) {
+    const out = [];
+    if (!Array.isArray(arr)) return out;
+    for (const r of arr) {
+      const n = normalizeRule(r);
+      if (n) out.push(n);
+    }
+    return out;
+  }
+
+  function cloneRule(r) {
+    return { ...r, id: r.id || safeRandomId() };
+  }
+
+  function loadRuleSetsState() {
     try {
-      localStorage.setItem(LS_HIGHLIGHT_RULES, JSON.stringify(highlightRules));
+      const raw = localStorage.getItem(LS_HIGHLIGHT_RULE_SETS);
+      if (raw) {
+        const data = JSON.parse(raw);
+        const sets = {};
+        if (data && data.sets && typeof data.sets === 'object') {
+          for (const [key, val] of Object.entries(data.sets)) {
+            if (!val || typeof val !== 'object') continue;
+            const id = typeof val.id === 'string' && val.id ? val.id : String(key);
+            const name = val.name != null ? String(val.name).trim() : 'Unnamed';
+            sets[id] = {
+              id,
+              name: name || 'Unnamed',
+              rules: normalizeRulesArray(val.rules),
+            };
+          }
+        }
+        let activeSetId =
+          data && data.activeSetId != null && String(data.activeSetId) ? String(data.activeSetId) : null;
+        if (activeSetId && !sets[activeSetId]) activeSetId = null;
+        const unsavedRules =
+          data && Array.isArray(data.unsavedRules) ? normalizeRulesArray(data.unsavedRules) : null;
+        return { activeSetId, sets, unsavedRules: unsavedRules && unsavedRules.length ? unsavedRules : null };
+      }
+    } catch {
+      /* fall through to legacy */
+    }
+
+    try {
+      const legacyRaw = localStorage.getItem(LS_HIGHLIGHT_RULES);
+      if (legacyRaw) {
+        const legacyRules = normalizeRulesArray(JSON.parse(legacyRaw));
+        if (legacyRules.length) {
+          const id = safeRandomId();
+          return {
+            activeSetId: id,
+            sets: { [id]: { id, name: 'Default', rules: legacyRules } },
+            unsavedRules: null,
+          };
+        }
+      }
     } catch {
       /* ignore */
     }
+
+    return { activeSetId: null, sets: {}, unsavedRules: null };
+  }
+
+  function saveRuleSetsState() {
+    try {
+      localStorage.setItem(
+        LS_HIGHLIGHT_RULE_SETS,
+        JSON.stringify({
+          activeSetId: ruleSetsState.activeSetId,
+          sets: ruleSetsState.sets,
+          unsavedRules: ruleSetsState.unsavedRules,
+        })
+      );
+      localStorage.removeItem(LS_HIGHLIGHT_RULES);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function applyHighlightRulesFromState() {
+    if (ruleSetsState.activeSetId && ruleSetsState.sets[ruleSetsState.activeSetId]) {
+      highlightRules = ruleSetsState.sets[ruleSetsState.activeSetId].rules.map(cloneRule);
+      ruleSetsState.unsavedRules = null;
+      return;
+    }
+    if (ruleSetsState.unsavedRules && ruleSetsState.unsavedRules.length) {
+      highlightRules = ruleSetsState.unsavedRules.map(cloneRule);
+      return;
+    }
+    highlightRules = [];
+  }
+
+  function saveHighlightRules() {
+    if (ruleSetsState.activeSetId && ruleSetsState.sets[ruleSetsState.activeSetId]) {
+      ruleSetsState.sets[ruleSetsState.activeSetId].rules = highlightRules.map(cloneRule);
+      ruleSetsState.unsavedRules = null;
+    } else {
+      ruleSetsState.unsavedRules = highlightRules.length ? highlightRules.map(cloneRule) : null;
+    }
+    saveRuleSetsState();
+  }
+
+  function setRuleSetsStatus(text) {
+    const el = document.getElementById('rule-sets-status');
+    if (!el) return;
+    if (!text) {
+      el.hidden = true;
+      el.textContent = '';
+      return;
+    }
+    el.hidden = false;
+    el.textContent = text;
+  }
+
+  function sortedRuleSets() {
+    return Object.values(ruleSetsState.sets).sort((a, b) =>
+      String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' })
+    );
+  }
+
+  function findRuleSetByName(name) {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return null;
+    for (const set of Object.values(ruleSetsState.sets)) {
+      if (String(set.name).trim().toLowerCase() === n) return set;
+    }
+    return null;
+  }
+
+  function preloadAdTrackerListsForRules(rules) {
+    for (const r of rules || []) {
+      if (r && r.filterBy === 'adTrackerList' && r.filter) {
+        loadAdTrackerList(r.filter).catch(() => {});
+      }
+    }
+  }
+
+  function syncRuleSetsUi() {
+    const sel = document.getElementById('rule-set-active');
+    const nameInp = document.getElementById('rule-set-name');
+    const delBtn = document.getElementById('rule-set-delete');
+    const sets = sortedRuleSets();
+
+    if (sel instanceof HTMLSelectElement) {
+      const prev = sel.value;
+      sel.replaceChildren();
+      const none = document.createElement('option');
+      none.value = '';
+      none.textContent = sets.length ? '— Unsaved draft —' : '— None —';
+      sel.appendChild(none);
+      for (const set of sets) {
+        const o = document.createElement('option');
+        o.value = set.id;
+        o.textContent = set.name;
+        sel.appendChild(o);
+      }
+      if (ruleSetsState.activeSetId && ruleSetsState.sets[ruleSetsState.activeSetId]) {
+        sel.value = ruleSetsState.activeSetId;
+      } else {
+        sel.value = '';
+      }
+      if (!sel.value && prev && [...sel.options].some((o) => o.value === prev)) {
+        sel.value = prev;
+      }
+    }
+
+    if (nameInp instanceof HTMLInputElement) {
+      const active =
+        ruleSetsState.activeSetId && ruleSetsState.sets[ruleSetsState.activeSetId]
+          ? ruleSetsState.sets[ruleSetsState.activeSetId]
+          : null;
+      nameInp.value = active ? active.name : '';
+      nameInp.placeholder = sets.length ? 'Name for this rule set' : 'Name to save new rule set';
+    }
+
+    if (delBtn instanceof HTMLButtonElement) {
+      delBtn.disabled = !(ruleSetsState.activeSetId && ruleSetsState.sets[ruleSetsState.activeSetId]);
+    }
+  }
+
+  function switchActiveRuleSet(setId) {
+    saveHighlightRules();
+    ruleSetsState.activeSetId = setId && ruleSetsState.sets[setId] ? setId : null;
+    applyHighlightRulesFromState();
+    preloadAdTrackerListsForRules(highlightRules);
+    syncRuleSetsUi();
+    renderSettingsRules();
+    refreshTableAndArcs();
+  }
+
+  function saveNamedRuleSet() {
+    const nameInp = document.getElementById('rule-set-name');
+    const name = nameInp instanceof HTMLInputElement ? nameInp.value.trim() : '';
+    if (!name) {
+      setRuleSetsStatus('Enter a name for the rule set.');
+      return;
+    }
+
+    saveHighlightRules();
+
+    let target = findRuleSetByName(name);
+    if (target) {
+      target.rules = highlightRules.map(cloneRule);
+      target.name = name;
+      ruleSetsState.activeSetId = target.id;
+    } else {
+      const id = safeRandomId();
+      target = { id, name, rules: highlightRules.map(cloneRule) };
+      ruleSetsState.sets[id] = target;
+      ruleSetsState.activeSetId = id;
+    }
+    ruleSetsState.unsavedRules = null;
+    saveRuleSetsState();
+    setRuleSetsStatus(`Saved rule set "${name}".`);
+    syncRuleSetsUi();
+    renderSettingsRules();
+    refreshTableAndArcs();
+  }
+
+  function deleteActiveRuleSet() {
+    const id = ruleSetsState.activeSetId;
+    if (!id || !ruleSetsState.sets[id]) {
+      setRuleSetsStatus('Select a saved rule set to delete.');
+      return;
+    }
+    const name = ruleSetsState.sets[id].name;
+    delete ruleSetsState.sets[id];
+    const remaining = sortedRuleSets();
+    ruleSetsState.activeSetId = remaining.length ? remaining[0].id : null;
+    applyHighlightRulesFromState();
+    preloadAdTrackerListsForRules(highlightRules);
+    saveRuleSetsState();
+    setRuleSetsStatus(`Deleted rule set "${name}".`);
+    syncRuleSetsUi();
+    renderSettingsRules();
+    refreshTableAndArcs();
+  }
+
+  function initRuleSetsUi() {
+    const sel = document.getElementById('rule-set-active');
+    const saveBtn = document.getElementById('rule-set-save');
+    const delBtn = document.getElementById('rule-set-delete');
+
+    if (sel instanceof HTMLSelectElement) {
+      sel.addEventListener('change', () => {
+        const v = sel.value;
+        switchActiveRuleSet(v || null);
+        setRuleSetsStatus('');
+      });
+    }
+    if (saveBtn) saveBtn.addEventListener('click', () => saveNamedRuleSet());
+    if (delBtn) delBtn.addEventListener('click', () => deleteActiveRuleSet());
+    syncRuleSetsUi();
   }
 
   function isRuleFilled(r) {
@@ -578,6 +854,7 @@
       return remoteLocationForConnectionKey(ck, placesByKey, arcsByKey);
     }
     if (which === 'remoteIp') return String(conn && conn.remoteAddress ? conn.remoteAddress : '');
+    if (which === 'localIp') return String(conn && conn.localAddress ? conn.localAddress : '');
     return '';
   }
 
@@ -686,7 +963,7 @@
         continue;
       }
 
-      if (String(rule.filterBy) === 'remoteIp') {
+      if (String(rule.filterBy) === 'remoteIp' || String(rule.filterBy) === 'localIp') {
         if (matchesRemoteIp(value, expr)) return true;
         continue;
       }
@@ -705,7 +982,11 @@
       for (const r of highlightRules) {
         if (!isRuleFilled(r)) continue;
         if (ruleMatchesConnection(r, c, placesByKey, arcsByKey)) {
-          out.set(ck, { color: r.color || '#22c55e', ruleId: r.id });
+          out.set(ck, {
+            color: r.color || '#22c55e',
+            ruleId: r.id,
+            ruleLabel: ruleDisplayLabel(r),
+          });
           break;
         }
       }
@@ -815,19 +1096,33 @@
   function syncAddRuleButtonDisabled() {
     const addBtn = document.getElementById('settings-add-rule');
     if (!addBtn) return;
+    if (highlightRules.length === 0) {
+      addBtn.disabled = false;
+      return;
+    }
     const last = highlightRules[highlightRules.length - 1];
-    addBtn.disabled = !last || !isRuleFilled(last);
+    addBtn.disabled = !isRuleFilled(last);
   }
 
   function renderSettingsRules() {
     const host = document.getElementById('settings-rules');
     const addBtn = document.getElementById('settings-add-rule');
+    const emptyEl = document.getElementById('settings-rules-empty');
     if (!host || !addBtn) return;
+
+    if (emptyEl) emptyEl.hidden = highlightRules.length > 0;
+
     host.replaceChildren();
     const tpl = document.getElementById('settings-rule-template');
 
     function syncAddDisabled() {
       syncAddRuleButtonDisabled();
+      if (emptyEl) emptyEl.hidden = highlightRules.length > 0;
+    }
+
+    if (highlightRules.length === 0) {
+      syncAddDisabled();
+      return;
     }
 
     function fillSelect(sel, options, value) {
@@ -867,10 +1162,8 @@
 
       const removeBtn = card.querySelector('[data-role="rule-remove"]');
       if (removeBtn) {
-        removeBtn.disabled = highlightRules.length <= 1;
         removeBtn.addEventListener('click', () => {
           highlightRules = highlightRules.filter((x) => x.id !== r.id);
-          if (highlightRules.length === 0) highlightRules = [defaultRule()];
           saveHighlightRules();
           renderSettingsRules();
           refreshTableAndArcs();
@@ -930,7 +1223,7 @@
         filterInp.disabled = isAdTrackerList;
         if (!isAdTrackerList) {
           filterInp.placeholder =
-            r.filterBy === 'remoteIp'
+            r.filterBy === 'remoteIp' || r.filterBy === 'localIp'
               ? 'e.g. 180.92.1.177, 180.92.*, 180.92.1.1-180.92.1.255, or 180.92.1.0/24 (comma-delimited)'
               : 'Comma-delimited list. Use * as wildcard, or /regex/ (case-insensitive)';
           filterInp.value = r.filter || '';
@@ -1263,6 +1556,7 @@
     if (!ra) return '—';
     const rp = c.remotePort;
     if (rp == null || Number.isNaN(Number(rp))) return '—';
+    if (Number(rp) === 0) return ra;
     return `${ra}:${rp}`;
   }
 
@@ -1404,7 +1698,10 @@
       connectionKey: c.connectionKey,
       process: c.processName || '?',
       protocol: c.protocol != null && String(c.protocol).trim() !== '' ? String(c.protocol).trim() : 'TCP',
-      local: `${c.localAddress}:${c.localPort}`,
+      local:
+        c.localPort == null || Number(c.localPort) === 0
+          ? String(c.localAddress || '')
+          : `${c.localAddress}:${c.localPort}`,
       remote: formatRemoteCell(c),
       remoteHost: rh,
       copyLocal: String(c.localAddress || '').trim(),
@@ -1481,6 +1778,8 @@
   }
 
   let liveSearchQuery = '';
+  /** @type {'include' | 'exclude'} */
+  let liveSearchMode = 'include';
 
   function loadLiveSearchQuery() {
     try {
@@ -1500,6 +1799,23 @@
     }
   }
 
+  function loadLiveSearchMode() {
+    try {
+      const v = localStorage.getItem(LS_LIVE_SEARCH_MODE);
+      return v === 'exclude' ? 'exclude' : 'include';
+    } catch {
+      return 'include';
+    }
+  }
+
+  function saveLiveSearchMode(mode) {
+    try {
+      localStorage.setItem(LS_LIVE_SEARCH_MODE, mode === 'exclude' ? 'exclude' : 'include');
+    } catch {
+      /* ignore */
+    }
+  }
+
   function connectionMatchesLiveSearch(model, query) {
     const q = String(query || '').trim().toLowerCase();
     if (!q) return true;
@@ -1508,6 +1824,16 @@
       if (v && v !== '—' && v.includes(q)) return true;
     }
     return false;
+  }
+
+  function filterModelsByLiveSearch(models, query, mode) {
+    const q = String(query || '').trim();
+    if (!q) return models;
+    const exclude = mode === 'exclude';
+    return models.filter((m) => {
+      const matches = connectionMatchesLiveSearch(m, q);
+      return exclude ? !matches : matches;
+    });
   }
 
   function getHistoryProtocolFilter() {
@@ -1553,10 +1879,19 @@
     return filterArcsByProtocol(mergedA, getLiveProtocolFilter()).length;
   }
 
+  /** @type {'local' | 'pepwave'} */
+  let currentConnectionSource = 'local';
+
   function updateArcCountLabel() {
     if (!countEl) return;
     const n = getVisibleArcCount();
-    countEl.textContent = n ? `Showing ${n} connection${n === 1 ? '' : 's'}` : 'Showing no connections';
+    const noun =
+      currentConnectionSource === 'pepwave' ? 'router connection' : 'connection';
+    const nounPlural =
+      currentConnectionSource === 'pepwave' ? 'router connections' : 'connections';
+    countEl.textContent = n
+      ? `Showing ${n} ${n === 1 ? noun : nounPlural}`
+      : `Showing no ${nounPlural}`;
   }
 
   function refreshTableAndArcs() {
@@ -1840,6 +2175,18 @@
 
   function initLiveSearch() {
     liveSearchQuery = loadLiveSearchQuery();
+    liveSearchMode = loadLiveSearchMode();
+
+    const modeSel = document.getElementById('live-search-mode');
+    if (modeSel instanceof HTMLSelectElement) {
+      modeSel.value = liveSearchMode;
+      modeSel.addEventListener('change', () => {
+        liveSearchMode = modeSel.value === 'exclude' ? 'exclude' : 'include';
+        saveLiveSearchMode(liveSearchMode);
+        refreshTableAndArcs();
+      });
+    }
+
     const inp = document.getElementById('live-connections-search');
     if (!(inp instanceof HTMLInputElement)) return;
     inp.value = liveSearchQuery;
@@ -1852,76 +2199,104 @@
 
   function initProtocolFilters() {
     const liveMode = getLiveProtocolFilter();
-    for (const inp of document.querySelectorAll('input[name="live-protocol-filter"]')) {
-      if (inp instanceof HTMLInputElement) {
-        inp.checked = inp.value === liveMode;
-        inp.addEventListener('change', () => {
-          if (!inp.checked) return;
-          try {
-            localStorage.setItem(LS_PROTOCOL_FILTER_LIVE, inp.value);
-          } catch {
-            /* ignore */
-          }
-          refreshTableAndArcs();
-        });
-      }
+    const liveSel = document.getElementById('live-protocol-filter');
+    if (liveSel instanceof HTMLSelectElement) {
+      liveSel.value = liveMode === 'tcp' || liveMode === 'udp' || liveMode === 'both' ? liveMode : 'both';
+      liveSel.addEventListener('change', () => {
+        const v = liveSel.value;
+        if (v !== 'tcp' && v !== 'udp' && v !== 'both') return;
+        try {
+          localStorage.setItem(LS_PROTOCOL_FILTER_LIVE, v);
+        } catch {
+          /* ignore */
+        }
+        refreshTableAndArcs();
+      });
     }
 
     const histMode = getHistoryProtocolFilter();
-    for (const inp of document.querySelectorAll('input[name="history-protocol-filter"]')) {
-      if (inp instanceof HTMLInputElement) {
-        inp.checked = inp.value === histMode;
-        inp.addEventListener('change', () => {
-          if (!inp.checked) return;
-          try {
-            localStorage.setItem(LS_PROTOCOL_FILTER_HISTORY, inp.value);
-          } catch {
-            /* ignore */
-          }
-          renderHistoryTable();
-        });
-      }
+    const histSel = document.getElementById('history-protocol-filter');
+    if (histSel instanceof HTMLSelectElement) {
+      histSel.value = histMode === 'tcp' || histMode === 'udp' || histMode === 'both' ? histMode : 'both';
+      histSel.addEventListener('change', () => {
+        const v = histSel.value;
+        if (v !== 'tcp' && v !== 'udp' && v !== 'both') return;
+        try {
+          localStorage.setItem(LS_PROTOCOL_FILTER_HISTORY, v);
+        } catch {
+          /* ignore */
+        }
+        renderHistoryTable();
+      });
     }
   }
 
   function initPanelTabs() {
     const liveTab = document.getElementById('tab-live');
     const histTab = document.getElementById('tab-history');
+    const rulesTab = document.getElementById('tab-highlight-rules');
+    const settingsTab = document.getElementById('tab-settings');
     const livePanel = document.getElementById('panel-live');
     const histPanel = document.getElementById('panel-history');
-    const settingsTab = document.getElementById('tab-settings');
+    const rulesPanel = document.getElementById('panel-highlight-rules');
     const settingsPanel = document.getElementById('panel-settings');
-    if (!liveTab || !histTab || !settingsTab || !livePanel || !histPanel || !settingsPanel) return;
+    if (
+      !liveTab ||
+      !histTab ||
+      !rulesTab ||
+      !settingsTab ||
+      !livePanel ||
+      !histPanel ||
+      !rulesPanel ||
+      !settingsPanel
+    ) {
+      return;
+    }
+
+    function normalizeTab(which) {
+      if (which === 'settings') return 'settings';
+      if (which === 'highlight-rules' || which === 'rules') return 'highlight-rules';
+      if (which === 'history') return 'history';
+      return 'live';
+    }
 
     function selectTab(which) {
-      const w = which === 'settings' ? 'settings' : which === 'history' ? 'history' : 'live';
+      const w = normalizeTab(which);
       const isLive = w === 'live';
       const isHist = w === 'history';
+      const isRules = w === 'highlight-rules';
       const isSettings = w === 'settings';
 
       liveTab.setAttribute('aria-selected', isLive ? 'true' : 'false');
       histTab.setAttribute('aria-selected', isHist ? 'true' : 'false');
+      rulesTab.setAttribute('aria-selected', isRules ? 'true' : 'false');
       settingsTab.setAttribute('aria-selected', isSettings ? 'true' : 'false');
       liveTab.tabIndex = isLive ? 0 : -1;
       histTab.tabIndex = isHist ? 0 : -1;
+      rulesTab.tabIndex = isRules ? 0 : -1;
       settingsTab.tabIndex = isSettings ? 0 : -1;
       livePanel.hidden = !isLive;
       histPanel.hidden = !isHist;
+      rulesPanel.hidden = !isRules;
       settingsPanel.hidden = !isSettings;
       try {
         localStorage.setItem(LS_DRAWER_TAB, w);
       } catch {
         /* ignore */
       }
-      if (isSettings) renderSettingsRules();
+      if (isRules) {
+        syncRuleSetsUi();
+        renderSettingsRules();
+      }
     }
 
     liveTab.addEventListener('click', () => selectTab('live'));
     histTab.addEventListener('click', () => selectTab('history'));
+    rulesTab.addEventListener('click', () => selectTab('highlight-rules'));
     settingsTab.addEventListener('click', () => selectTab('settings'));
 
     const saved = localStorage.getItem(LS_DRAWER_TAB);
-    selectTab(saved === 'settings' ? 'settings' : saved === 'history' ? 'history' : 'live');
+    selectTab(saved || 'live');
   }
 
   function initConnectionsTableUi() {
@@ -2063,9 +2438,7 @@
     const allModels = (connections || []).map((c) => connectionRowModel(c, placesByKey));
     allModels.sort(compareConnectionModels);
     const searchQ = String(liveSearchQuery || '').trim();
-    const models = searchQ
-      ? allModels.filter((m) => connectionMatchesLiveSearch(m, searchQ))
-      : allModels;
+    const models = filterModelsByLiveSearch(allModels, searchQ, liveSearchMode);
 
     const visibleColCount = countVisibleCols('live') + 1;
 
@@ -2089,7 +2462,10 @@
       const td = document.createElement('td');
       td.colSpan = visibleColCount;
       td.className = 'connections-empty';
-      td.textContent = 'No connections match your search.';
+      td.textContent =
+        liveSearchMode === 'exclude'
+          ? 'No connections to show (all rows excluded by search).'
+          : 'No connections match your search.';
       tr.appendChild(td);
       tbody.appendChild(tr);
       syncTableHeaderSortState();
@@ -2122,6 +2498,11 @@
       if (style && style.color) {
         dot.classList.add('rule-dot-active');
         dot.style.background = style.color;
+        const tip = style.ruleLabel ? String(style.ruleLabel) : '';
+        if (tip) {
+          dot.title = tip;
+          tdDot.title = tip;
+        }
       }
       tdDot.appendChild(dot);
       tr.appendChild(tdDot);
@@ -2154,6 +2535,20 @@
   }
 
   function handlePayload(data) {
+    if (data.connectionSource === 'pepwave' || data.connectionSource === 'local') {
+      currentConnectionSource = data.connectionSource;
+    }
+
+    if (data.connectionSource === 'pepwave') {
+      if (data.error) {
+        setPepwaveSettingsStatus(String(data.error));
+      } else {
+        setPepwaveSettingsStatus('');
+      }
+    } else if (getConnectionSourceFromUi() !== 'pepwave') {
+      setPepwaveSettingsStatus('');
+    }
+
     if (data.error) {
       setError(data.error);
       flashState.clear();
@@ -2245,6 +2640,161 @@
     localStorage.setItem(LS_POLL_MS, String(n));
   }
 
+  function loadPepwaveConfig() {
+    try {
+      const raw = localStorage.getItem(LS_PEPWAVE_CONFIG);
+      if (!raw) return { host: '', username: '', password: '', sshPort: 8822 };
+      const o = JSON.parse(raw);
+      let sshPort = o && o.sshPort != null ? Number(o.sshPort) : 8822;
+      if (!Number.isFinite(sshPort) || sshPort <= 0) sshPort = 8822;
+      return {
+        host: o && o.host != null ? String(o.host) : '',
+        username: o && o.username != null ? String(o.username) : '',
+        password: o && o.password != null ? String(o.password) : '',
+        sshPort,
+      };
+    } catch {
+      return { host: '', username: '', password: '', sshPort: 8822 };
+    }
+  }
+
+  function savePepwaveConfig(cfg) {
+    try {
+      localStorage.setItem(LS_PEPWAVE_CONFIG, JSON.stringify(cfg));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function getConnectionSourceFromUi() {
+    const sel = document.getElementById('connection-source');
+    const v = sel instanceof HTMLSelectElement ? sel.value : 'local';
+    return v === 'pepwave' ? 'pepwave' : 'local';
+  }
+
+  function readPepwaveConfigFromUi() {
+    const hostEl = document.getElementById('pepwave-host');
+    const userEl = document.getElementById('pepwave-username');
+    const passEl = document.getElementById('pepwave-password');
+    const portEl = document.getElementById('pepwave-ssh-port');
+    let sshPort = portEl instanceof HTMLInputElement ? Number(portEl.value) : 8822;
+    if (!Number.isFinite(sshPort) || sshPort <= 0) sshPort = 8822;
+    return {
+      host: hostEl instanceof HTMLInputElement ? hostEl.value.trim() : '',
+      username: userEl instanceof HTMLInputElement ? userEl.value : '',
+      password: passEl instanceof HTMLInputElement ? passEl.value : '',
+      sshPort,
+    };
+  }
+
+  function setPepwaveSettingsStatus(text) {
+    const el = document.getElementById('pepwave-settings-status');
+    if (!el) return;
+    if (!text) {
+      el.hidden = true;
+      el.textContent = '';
+      return;
+    }
+    el.hidden = false;
+    el.textContent = text;
+  }
+
+  function syncPepwavePanelVisibility() {
+    const panel = document.getElementById('pepwave-settings');
+    const source = getConnectionSourceFromUi();
+    if (panel) panel.hidden = source !== 'pepwave';
+    if (source !== 'pepwave') setPepwaveSettingsStatus('');
+  }
+
+  function sendConnectionSourceToServer() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const source = getConnectionSourceFromUi();
+    const payload = { type: 'setConnectionSource', source };
+    if (source === 'pepwave') {
+      const cfg = readPepwaveConfigFromUi();
+      savePepwaveConfig(cfg);
+      payload.pepwave = cfg;
+      if (!cfg.host || !cfg.username) {
+        setPepwaveSettingsStatus('Enter router address and username to connect.');
+        return;
+      }
+      setPepwaveSettingsStatus('Connecting to Pepwave router…');
+    }
+    currentConnectionSource = source === 'pepwave' ? 'pepwave' : 'local';
+    updateArcCountLabel();
+    ws.send(JSON.stringify(payload));
+  }
+
+  function initConnectionSourceControl() {
+    const sel = document.getElementById('connection-source');
+    if (!(sel instanceof HTMLSelectElement)) return;
+
+    try {
+      const saved = localStorage.getItem(LS_CONNECTION_SOURCE);
+      if (saved === 'pepwave' || saved === 'local') sel.value = saved;
+    } catch {
+      /* ignore */
+    }
+
+    const cfg = loadPepwaveConfig();
+    const hostEl = document.getElementById('pepwave-host');
+    const userEl = document.getElementById('pepwave-username');
+    const passEl = document.getElementById('pepwave-password');
+    const portEl = document.getElementById('pepwave-ssh-port');
+    if (hostEl instanceof HTMLInputElement) hostEl.value = cfg.host;
+    if (userEl instanceof HTMLInputElement) userEl.value = cfg.username;
+    if (passEl instanceof HTMLInputElement) passEl.value = cfg.password;
+    if (portEl instanceof HTMLInputElement) portEl.value = String(cfg.sshPort || 8822);
+
+    syncPepwavePanelVisibility();
+    currentConnectionSource = getConnectionSourceFromUi() === 'pepwave' ? 'pepwave' : 'local';
+    updateArcCountLabel();
+
+    const push = () => {
+      try {
+        localStorage.setItem(LS_CONNECTION_SOURCE, getConnectionSourceFromUi());
+      } catch {
+        /* ignore */
+      }
+      syncPepwavePanelVisibility();
+      sendConnectionSourceToServer();
+    };
+
+    let pepwavePushTimer = null;
+    const schedulePush = () => {
+      if (pepwavePushTimer) clearTimeout(pepwavePushTimer);
+      pepwavePushTimer = setTimeout(() => {
+        pepwavePushTimer = null;
+        push();
+      }, 500);
+    };
+
+    sel.addEventListener('change', push);
+    for (const id of ['pepwave-host', 'pepwave-username', 'pepwave-password', 'pepwave-ssh-port']) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.addEventListener('change', push);
+      if (el instanceof HTMLInputElement && (el.type === 'text' || el.type === 'password')) {
+        el.addEventListener('input', () => {
+          savePepwaveConfig(readPepwaveConfigFromUi());
+          if (getConnectionSourceFromUi() === 'pepwave') schedulePush();
+        });
+      }
+    }
+  }
+
+  function initGlobeThemeControl() {
+    const sel = document.getElementById('globe-theme');
+    if (!sel) return;
+    const theme = loadGlobeTheme();
+    sel.value = theme;
+    sel.addEventListener('change', () => {
+      const next = sel.value === 'day' ? 'day' : 'night';
+      saveGlobeTheme(next);
+      applyGlobeTheme(next);
+    });
+  }
+
   function initPollIntervalControl() {
     const sel = document.getElementById('poll-interval');
     if (!sel) return;
@@ -2271,12 +2821,17 @@
       if (saved && POLL_MS_OPTIONS.includes(Number(saved))) {
         ws.send(JSON.stringify({ type: 'setPollMs', ms: Number(saved) }));
       }
+      sendConnectionSourceToServer();
     };
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        if (data && data.type === 'config' && data.pollMs != null) {
-          applyPollIntervalFromServer(data.pollMs);
+        if (data && data.type === 'config') {
+          if (data.pollMs != null) applyPollIntervalFromServer(data.pollMs);
+          if (data.connectionSource === 'pepwave' || data.connectionSource === 'local') {
+            currentConnectionSource = data.connectionSource;
+            updateArcCountLabel();
+          }
           return;
         }
         handlePayload(data);
@@ -2293,20 +2848,22 @@
     };
   }
 
+  initGlobeThemeControl();
   initPollIntervalControl();
+  initConnectionSourceControl();
   initConnectionsTableUi();
   initHistoryTableUi();
-  highlightRules = loadHighlightRules();
-  for (const r of highlightRules) {
-    if (r && r.filterBy === 'adTrackerList' && r.filter) {
-      loadAdTrackerList(r.filter).catch(() => {});
-    }
-  }
+  ruleSetsState = loadRuleSetsState();
+  applyHighlightRulesFromState();
+  preloadAdTrackerListsForRules(highlightRules);
+  initRuleSetsUi();
   const addRuleBtn = document.getElementById('settings-add-rule');
   if (addRuleBtn) {
     addRuleBtn.addEventListener('click', () => {
-      const last = highlightRules[highlightRules.length - 1];
-      if (last && !isRuleFilled(last)) return;
+      if (highlightRules.length > 0) {
+        const last = highlightRules[highlightRules.length - 1];
+        if (!isRuleFilled(last)) return;
+      }
       highlightRules.push(defaultRule());
       saveHighlightRules();
       renderSettingsRules();
