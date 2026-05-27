@@ -15,6 +15,7 @@
   const LS_SORT_DIR = 'netstatGlobeTableSortDir';
   const LS_POV = 'netstatGlobePov';
   const LS_GLOBE_THEME = 'netstatGlobeGlobeTheme';
+  const LS_GLOBE_CLOUDS = 'netstatGlobeGlobeClouds';
   /** @deprecated migrated to LS_GLOBE_THEME value `realtime` */
   const LS_GLOBE_DAY_NIGHT_LEGACY = 'netstatGlobeGlobeDayNight';
   const GLOBE_THEME_REALTIME = 'realtime';
@@ -27,6 +28,10 @@
     night: '//cdn.jsdelivr.net/npm/three-globe/example/img/earth-night.jpg',
     day: '//cdn.jsdelivr.net/npm/three-globe/example/img/earth-blue-marble.jpg',
   };
+
+  const CLOUDS_IMG_URL = 'https://clouds.matteason.co.uk/images/8192x4096/clouds-alpha.png';
+  const CLOUDS_ALT = 0.004;
+  const CLOUDS_UPDATE_MS = 3 * 60 * 60 * 1000;
 
   const GLOBE_DAY_NIGHT_SHADER = {
     vertexShader: `
@@ -309,6 +314,161 @@
   let globeDayNightEnabling = false;
   let globeRealtimeLoadId = 0;
 
+  let globeCloudsEnabled = false;
+  let globeCloudsMesh = null;
+  let globeCloudsTexture = null;
+  let globeCloudsRefreshTimer = null;
+  let globeCloudsLoading = false;
+
+  function loadGlobeCloudsEnabled() {
+    try {
+      return localStorage.getItem(LS_GLOBE_CLOUDS) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function saveGlobeCloudsEnabled(enabled) {
+    try {
+      localStorage.setItem(LS_GLOBE_CLOUDS, enabled ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function cloudsUrlForNow() {
+    const bucket = Math.floor(Date.now() / CLOUDS_UPDATE_MS);
+    return `${CLOUDS_IMG_URL}?v=${bucket}`;
+  }
+
+  function clearCloudsRefreshTimer() {
+    if (globeCloudsRefreshTimer) clearTimeout(globeCloudsRefreshTimer);
+    globeCloudsRefreshTimer = null;
+  }
+
+  function scheduleCloudsRefresh() {
+    clearCloudsRefreshTimer();
+    if (!globeCloudsEnabled) return;
+    const now = Date.now();
+    const next = (Math.floor(now / CLOUDS_UPDATE_MS) + 1) * CLOUDS_UPDATE_MS;
+    const delay = Math.max(5000, next - now + 250);
+    globeCloudsRefreshTimer = setTimeout(() => {
+      refreshCloudsTexture();
+    }, delay);
+  }
+
+  let cloudsThreePromise = null;
+  function loadThreeForClouds() {
+    if (!cloudsThreePromise) {
+      cloudsThreePromise = import('https://esm.sh/three@0.180.0').then((t) => ({
+        Mesh: t.Mesh,
+        SphereGeometry: t.SphereGeometry,
+        MeshPhongMaterial: t.MeshPhongMaterial,
+        TextureLoader: t.TextureLoader,
+      }));
+    }
+    return cloudsThreePromise;
+  }
+
+  function ensureCloudsMesh() {
+    if (globeCloudsMesh) return Promise.resolve(globeCloudsMesh);
+    if (!world || typeof world.scene !== 'function' || typeof world.getGlobeRadius !== 'function') {
+      return Promise.resolve(null);
+    }
+    const r = Number(world.getGlobeRadius());
+    if (!Number.isFinite(r) || r <= 0) return Promise.resolve(null);
+
+    return loadThreeForClouds()
+      .then(({ Mesh, SphereGeometry, MeshPhongMaterial }) => {
+        if (globeCloudsMesh) return globeCloudsMesh;
+        if (!globeCloudsEnabled) return null;
+
+        const geom = new SphereGeometry(r * (1 + CLOUDS_ALT), 75, 75);
+        const mat = new MeshPhongMaterial({
+          transparent: true,
+          opacity: 1,
+          depthWrite: false,
+        });
+        const mesh = new Mesh(geom, mat);
+        // Match three-globe's internal globe rotation (prime meridian facing Z)
+        mesh.rotation.y = -Math.PI / 2;
+        mesh.renderOrder = 10;
+
+        world.scene().add(mesh);
+        globeCloudsMesh = mesh;
+        return mesh;
+      })
+      .catch(() => null);
+  }
+
+  function disposeClouds() {
+    clearCloudsRefreshTimer();
+    if (globeCloudsTexture && typeof globeCloudsTexture.dispose === 'function') {
+      globeCloudsTexture.dispose();
+    }
+    globeCloudsTexture = null;
+
+    if (globeCloudsMesh) {
+      try {
+        if (world && typeof world.scene === 'function') world.scene().remove(globeCloudsMesh);
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (globeCloudsMesh.geometry && typeof globeCloudsMesh.geometry.dispose === 'function') globeCloudsMesh.geometry.dispose();
+        if (globeCloudsMesh.material && typeof globeCloudsMesh.material.dispose === 'function') globeCloudsMesh.material.dispose();
+      } catch {
+        /* ignore */
+      }
+      globeCloudsMesh = null;
+    }
+  }
+
+  function refreshCloudsTexture() {
+    if (!globeCloudsEnabled) return;
+    if (globeCloudsLoading) return;
+    globeCloudsLoading = true;
+    Promise.all([ensureCloudsMesh(), loadThreeForClouds()])
+      .then(([mesh, three]) => {
+        if (!mesh || !globeCloudsEnabled) throw new Error('no mesh');
+        const loader = new three.TextureLoader();
+        try {
+          loader.setCrossOrigin && loader.setCrossOrigin('anonymous');
+        } catch {
+          /* ignore */
+        }
+        return loader.loadAsync(cloudsUrlForNow()).then((tex) => ({ mesh, tex }));
+      })
+      .then(({ mesh, tex }) => {
+        globeCloudsLoading = false;
+        if (!globeCloudsEnabled || !globeCloudsMesh) {
+          tex && tex.dispose && tex.dispose();
+          return;
+        }
+        if (globeCloudsTexture && globeCloudsTexture.dispose) globeCloudsTexture.dispose();
+        globeCloudsTexture = tex;
+        if (mesh.material) {
+          mesh.material.map = tex;
+          mesh.material.needsUpdate = true;
+        }
+        scheduleCloudsRefresh();
+      })
+      .catch(() => {
+        globeCloudsLoading = false;
+        if (globeCloudsEnabled) scheduleCloudsRefresh();
+      });
+  }
+
+  function setCloudsEnabled(enabled) {
+    globeCloudsEnabled = !!enabled;
+    saveGlobeCloudsEnabled(globeCloudsEnabled);
+    if (globeCloudsEnabled) {
+      refreshCloudsTexture();
+    } else {
+      disposeClouds();
+    }
+  }
+
   function sunPosAt(dt, solar) {
     const day = new Date(+dt).setUTCHours(0, 0, 0, 0);
     const t = solar.century(dt);
@@ -509,6 +669,8 @@
   if (!webGLSupported) {
     renderWebGLUnsupportedMessage(globeEl);
   }
+
+  globeCloudsEnabled = loadGlobeCloudsEnabled();
 
   function loadSavedPov() {
     try {
@@ -3061,6 +3223,18 @@
     });
   }
 
+  function initGlobeCloudsControl() {
+    const cb = document.getElementById('globe-clouds');
+    if (!(cb instanceof HTMLInputElement)) return;
+    cb.checked = globeCloudsEnabled;
+    cb.addEventListener('change', () => {
+      setCloudsEnabled(cb.checked);
+    });
+    if (globeCloudsEnabled) {
+      setCloudsEnabled(true);
+    }
+  }
+
   function initPollIntervalControl() {
     const sel = document.getElementById('poll-interval');
     if (!sel) return;
@@ -3115,6 +3289,7 @@
   }
 
   initGlobeThemeControl();
+  initGlobeCloudsControl();
   initPollIntervalControl();
   initConnectionSourceControl();
   initConnectionsTableUi();

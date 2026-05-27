@@ -56,6 +56,10 @@ In **Settings → Globe Theme**, pick one of:
 
 The choice is saved in your browser (`localStorage`). If the real-time shader fails to load (network or WebGL), the app falls back to **Night**. The boundaries theme loads tiles from [OpenStreetMap](https://www.openstreetmap.org/copyright); use responsibly per their [tile usage policy](https://operations.osmfoundation.org/policies/tiles/).
 
+### Globe clouds
+
+Enable **Show clouds (updated every 3 hours)** to overlay a static clouds texture on top of the globe. The image is re-fetched every 3 hours from `https://clouds.matteason.co.uk/images/8192x4096/clouds.jpg`.
+
 ### Update frequency
 
 Choose how often the server polls for new connections (0.5 s–30 s). The choice is remembered in your browser and sent to the server over WebSocket.
