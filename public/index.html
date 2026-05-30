@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Netstat Globe</title>
     <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0"
+    />
     <!-- Do not load three.js here: globe.gl ships a matching Three and will use window.THREE if set, which can break rendering. -->
     <!-- <script src="https://unpkg.com/globe.gl@2.32.1/dist/globe.gl.min.js"></script> -->
     <script src="//cdn.jsdelivr.net/npm/globe.gl"></script>
@@ -85,11 +89,11 @@
             <div id="panel-live" class="tab-panel" role="tabpanel" aria-labelledby="tab-live">
               <div class="table-toolbar table-toolbar-live">
                 <label class="protocol-filter" for="live-protocol-filter">
-                  <span class="protocol-filter-label">Show</span>
+                  <span class="protocol-filter-label"></span>
                   <select id="live-protocol-filter" class="protocol-filter-select" aria-label="Filter live connections by protocol">
                     <option value="tcp">TCP</option>
                     <option value="udp">UDP</option>
-                    <option value="both">Both TCP &amp; UDP</option>
+                    <option value="both">TCP &amp; UDP</option>
                   </select>
                 </label>
                 <label class="live-search-label" for="live-connections-search">
@@ -101,15 +105,32 @@
                     type="search"
                     id="live-connections-search"
                     class="live-search-input"
-                    placeholder="Process, local, remote, host, from, to…"
+                    placeholder="Search…"
                     autocomplete="off"
                     spellcheck="false"
                     aria-label="Search live connections"
                   />
                 </label>
-                <button type="button" id="live-choose-columns" class="choose-columns-btn">
-                  Choose columns
-                </button>
+                <div class="toolbar-buttons-right">
+                  <button
+                    type="button"
+                    id="live-export-csv"
+                    class="table-export-btn icon-btn"
+                    title="Export visible rows to CSV"
+                    aria-label="Export visible rows to CSV"
+                  >
+                    <span class="material-symbols-outlined" aria-hidden="true">download</span>
+                  </button>
+                  <button
+                    type="button"
+                    id="live-choose-columns"
+                    class="choose-columns-btn icon-btn"
+                    title="Choose columns"
+                    aria-label="Choose columns"
+                  >
+                    <span class="material-symbols-outlined" aria-hidden="true">view_column_2</span>
+                  </button>
+                </div>
               </div>
               <table id="live-connections-table" class="connections-table">
                 <thead>
@@ -133,24 +154,55 @@
             <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
               <div class="table-toolbar history-toolbar">
                 <label class="protocol-filter" for="history-protocol-filter">
-                  <span class="protocol-filter-label">Show</span>
+                  <span class="protocol-filter-label"></span>
                   <select id="history-protocol-filter" class="protocol-filter-select" aria-label="Filter history by protocol">
                     <option value="tcp">TCP</option>
                     <option value="udp">UDP</option>
-                    <option value="both">Both TCP &amp; UDP</option>
+                    <option value="both">TCP &amp; UDP</option>
                   </select>
+                </label>
+                <label class="live-search-label" for="history-connections-search">
+                  <select id="history-search-mode" class="protocol-filter-select live-search-mode-select" aria-label="History search include or exclude">
+                    <option value="include">Include</option>
+                    <option value="exclude">Exclude</option>
+                  </select>
+                  <input
+                    type="search"
+                    id="history-connections-search"
+                    class="live-search-input"
+                    placeholder="Search…"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-label="Search history"
+                  />
                 </label>
                 <div class="history-toolbar-right">
                   <label class="history-max-label">
-                    <span>Keep up to</span>
+                    <span>Rows</span>
                     <input type="number" id="history-max-rows" min="1" max="50000" step="1" value="2000" title="Maximum history rows (oldest dropped when exceeded)" />
-                    <span>rows</span>
                   </label>
                   <button type="button" id="history-clear" class="history-clear-btn">Clear</button>
                 </div>
-                <button type="button" id="history-choose-columns" class="choose-columns-btn">
-                  Choose columns
-                </button>
+                <div class="toolbar-buttons-right">
+                  <button
+                    type="button"
+                    id="history-export-csv"
+                    class="table-export-btn icon-btn"
+                    title="Export visible rows to CSV"
+                    aria-label="Export visible rows to CSV"
+                  >
+                    <span class="material-symbols-outlined" aria-hidden="true">download</span>
+                  </button>
+                  <button
+                    type="button"
+                    id="history-choose-columns"
+                    class="choose-columns-btn icon-btn"
+                    title="Choose columns"
+                    aria-label="Choose columns"
+                  >
+                    <span class="material-symbols-outlined" aria-hidden="true">view_column_2</span>
+                  </button>
+                </div>
               </div>
               <table id="history-connections-table" class="connections-table">
                 <thead>
@@ -179,13 +231,13 @@
                 </p>
                 <div class="rule-sets-toolbar">
                   <label class="settings-field rule-sets-field">
-                    <span class="settings-field-label">Active rule set</span>
+                    <span class="settings-field-label">Active Rule Set</span>
                     <select id="rule-set-active" class="settings-select" aria-label="Active rule set">
                       <option value="">— None —</option>
                     </select>
                   </label>
                   <label class="settings-field rule-sets-field">
-                    <span class="settings-field-label">Set name</span>
+                    <span class="settings-field-label">Set Name</span>
                     <input
                       id="rule-set-name"
                       class="settings-input"
@@ -215,22 +267,22 @@
             <div id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-settings" hidden>
               <div class="settings-section">
                 <h3 class="settings-title">Connection Source</h3>
-                <p class="settings-help">
-                  <strong>Local</strong> reads connections on this computer. <strong>Pepwave</strong> runs
-                  <code>get session</code> over SSH to list the router&apos;s active NAT sessions. Enable
-                  <em>System → Admin Security → CLI SSH</em> (default port 8822). Use your local admin login (not
-                  InControl 2).
-                </p>
                 <label class="settings-row" for="connection-source">
                   <span class="settings-label">Source</span>
                   <select id="connection-source" class="settings-select" aria-label="Connection data source">
                     <option value="local" selected>Local Machine</option>
                     <option value="pepwave">Pepwave Router</option>
                   </select>
+                  <ul class="settings-help connection-source-settings-help">
+                    <li><strong>Local Machine</strong> reads connections on this computer.</li>
+                    <li><strong>Pepwave Router</strong> runs <code>get session</code> over SSH to list the router&apos;s active NAT sessions. Enable
+                    <em>System → Admin Security → CLI SSH</em> (default port 8822). Use your local admin login (not
+                    InControl 2).</li>
+                  </ul>
                 </label>
                 <div id="pepwave-settings" class="pepwave-settings" hidden>
                   <label class="settings-field settings-field-wide">
-                    <span class="settings-field-label">Router address</span>
+                    <span class="settings-field-label">Router Address</span>
                     <input
                       id="pepwave-host"
                       class="settings-input"
@@ -261,7 +313,7 @@
                     />
                   </label>
                   <label class="settings-field settings-field-wide">
-                    <span class="settings-field-label">SSH port</span>
+                    <span class="settings-field-label">SSH Port</span>
                     <input
                       id="pepwave-ssh-port"
                       class="settings-input"

@@ -30,7 +30,10 @@
   };
 
   const CLOUDS_IMG_URL = 'https://clouds.matteason.co.uk/images/8192x4096/clouds-alpha.png';
-  const CLOUDS_ALT = 0.004;
+  /** Altitude above surface (ft), as fraction of Earth mean radius (WGS-84 R₁). */
+  const CLOUDS_ALTITUDE_FT = 500_000;
+  const EARTH_MEAN_RADIUS_FT = 20_902_260;
+  const CLOUDS_ALT = CLOUDS_ALTITUDE_FT / EARTH_MEAN_RADIUS_FT;
   const CLOUDS_UPDATE_MS = 3 * 60 * 60 * 1000;
 
   const GLOBE_DAY_NIGHT_SHADER = {
@@ -113,9 +116,12 @@
   const LS_PROTOCOL_FILTER_HISTORY = 'netstatGlobeProtocolFilterHistory';
   const LS_LIVE_SEARCH = 'netstatGlobeLiveSearch';
   const LS_LIVE_SEARCH_MODE = 'netstatGlobeLiveSearchMode';
+  const LS_HISTORY_SEARCH = 'netstatGlobeHistorySearch';
+  const LS_HISTORY_SEARCH_MODE = 'netstatGlobeHistorySearchMode';
   const LS_CONNECTION_SOURCE = 'netstatGlobeConnectionSource';
   const LS_PEPWAVE_CONFIG = 'netstatGlobePepwaveConfig';
   const LIVE_SEARCH_COLS = ['process', 'local', 'remote', 'remoteHost', 'from', 'to'];
+  const HISTORY_SEARCH_COLS = ['time', 'event', 'process', 'local', 'remote', 'remoteHost', 'from', 'to'];
   const TABLE_HISTORY_SORT_IDS = [
     'time',
     'event',
@@ -209,6 +215,11 @@
 
   /** @type {Array<{ ts: number, event: string, process: string, protocol: string, local: string, remote: string, remoteHost: string, from: string, to: string, pid: number|null, pidStr: string }>} */
   let connectionHistory = [];
+  let activeDrawerTab = 'live';
+  let liveTableDirty = false;
+  let historyTableDirty = false;
+  let historyRenderTimer = null;
+  let pageHidden = typeof document !== 'undefined' ? document.hidden : false;
 
   const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${wsProto}//${window.location.host}`;
@@ -310,9 +321,11 @@
   let currentGlobeTheme = loadGlobeTheme();
   let globeDayNightMaterial = null;
   let globeDayNightStopRaf = null;
+  let globeDayNightSolar = null;
   let globeDayNightModulesPromise = null;
   let globeDayNightEnabling = false;
   let globeRealtimeLoadId = 0;
+  const GLOBE_DAY_NIGHT_UPDATE_MS = 60000;
 
   let globeCloudsEnabled = false;
   let globeCloudsMesh = null;
@@ -358,16 +371,145 @@
   }
 
   let cloudsThreePromise = null;
+  let globeThreeApi = null;
+
+  function resetCloudsThreeCache() {
+    cloudsThreePromise = null;
+    globeThreeApi = null;
+  }
+
+  function createCloudsThreeApi(THREE) {
+    const loadTexture = (url) =>
+      new Promise((resolve, reject) => {
+        if (THREE.TextureLoader) {
+          const loader = new THREE.TextureLoader();
+          try {
+            loader.setCrossOrigin && loader.setCrossOrigin('anonymous');
+          } catch {
+            /* ignore */
+          }
+          loader.load(
+            url,
+            (tex) => {
+              if (THREE.SRGBColorSpace && tex.colorSpace !== undefined) {
+                tex.colorSpace = THREE.SRGBColorSpace;
+              }
+              resolve(tex);
+            },
+            undefined,
+            () => reject(new Error('Texture load failed'))
+          );
+          return;
+        }
+        const tex = new THREE.Texture();
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          tex.image = img;
+          if (THREE.SRGBColorSpace && tex.colorSpace !== undefined) {
+            tex.colorSpace = THREE.SRGBColorSpace;
+          }
+          tex.needsUpdate = true;
+          resolve(tex);
+        };
+        img.onerror = () => reject(new Error('Texture load failed'));
+        img.src = url;
+      });
+
+    return {
+      Mesh: THREE.Mesh,
+      SphereGeometry: THREE.SphereGeometry,
+      MeshPhongMaterial: THREE.MeshPhongMaterial,
+      loadTexture,
+    };
+  }
+
+  function inferThreeFromGlobeScene() {
+    if (typeof window !== 'undefined' && window.THREE && typeof window.THREE.Mesh === 'function') {
+      return createCloudsThreeApi(window.THREE);
+    }
+    if (!world || typeof world.scene !== 'function') return null;
+
+    let sampleMesh = null;
+    let TextureCtor = null;
+    world.scene().traverse((obj) => {
+      if (obj && obj.isTexture && !TextureCtor) TextureCtor = obj.constructor;
+      if (!sampleMesh && obj && obj.isMesh && obj.geometry && obj.material) sampleMesh = obj;
+      if (!TextureCtor && obj && obj.isMesh && obj.material) {
+        const mat = obj.material;
+        if (mat.map) TextureCtor = mat.map.constructor;
+        if (!TextureCtor && mat.uniforms) {
+          const u = mat.uniforms;
+          if (u.dayTexture && u.dayTexture.value && u.dayTexture.value.isTexture) {
+            TextureCtor = u.dayTexture.value.constructor;
+          }
+          if (!TextureCtor && u.nightTexture && u.nightTexture.value && u.nightTexture.value.isTexture) {
+            TextureCtor = u.nightTexture.value.constructor;
+          }
+        }
+      }
+    });
+    if (!sampleMesh || !TextureCtor) return null;
+
+    const THREE = {
+      Mesh: sampleMesh.constructor,
+      SphereGeometry: sampleMesh.geometry.constructor,
+      MeshPhongMaterial: sampleMesh.material.constructor,
+      Texture: TextureCtor,
+    };
+    return createCloudsThreeApi(THREE);
+  }
+
+  function loadThreeModuleFallback() {
+    return import('https://esm.sh/three@0.180.0').then((t) => createCloudsThreeApi(t));
+  }
+
+  function waitForGlobeThreeApi() {
+    const tryInfer = () => inferThreeFromGlobeScene();
+
+    return new Promise((resolve) => {
+      const immediate = tryInfer();
+      if (immediate) {
+        resolve(immediate);
+        return;
+      }
+      let attempts = 0;
+      const poll = () => {
+        const api = tryInfer();
+        if (api) {
+          resolve(api);
+          return;
+        }
+        attempts += 1;
+        if (attempts >= 150) {
+          loadThreeModuleFallback()
+            .then((api) => resolve(api))
+            .catch(() => resolve(null));
+          return;
+        }
+        setTimeout(poll, 100);
+      };
+      poll();
+    });
+  }
+
   function loadThreeForClouds() {
     if (!cloudsThreePromise) {
-      cloudsThreePromise = import('https://esm.sh/three@0.180.0').then((t) => ({
-        Mesh: t.Mesh,
-        SphereGeometry: t.SphereGeometry,
-        MeshPhongMaterial: t.MeshPhongMaterial,
-        TextureLoader: t.TextureLoader,
-      }));
+      cloudsThreePromise = waitForGlobeThreeApi().then((api) => {
+        if (api) globeThreeApi = api;
+        return api;
+      });
     }
     return cloudsThreePromise;
+  }
+
+  function getCloudsAttachParent() {
+    if (!world || typeof world.scene !== 'function') return null;
+    let attach = null;
+    world.scene().traverse((obj) => {
+      if (obj && obj.__globeObjType === 'globe' && obj.parent) attach = obj.parent;
+    });
+    return attach || world.scene();
   }
 
   function ensureCloudsMesh() {
@@ -379,7 +521,9 @@
     if (!Number.isFinite(r) || r <= 0) return Promise.resolve(null);
 
     return loadThreeForClouds()
-      .then(({ Mesh, SphereGeometry, MeshPhongMaterial }) => {
+      .then((three) => {
+        if (!three) return null;
+        const { Mesh, SphereGeometry, MeshPhongMaterial } = three;
         if (globeCloudsMesh) return globeCloudsMesh;
         if (!globeCloudsEnabled) return null;
 
@@ -388,13 +532,16 @@
           transparent: true,
           opacity: 1,
           depthWrite: false,
+          alphaTest: 0.02,
         });
         const mesh = new Mesh(geom, mat);
         // Match three-globe's internal globe rotation (prime meridian facing Z)
         mesh.rotation.y = -Math.PI / 2;
         mesh.renderOrder = 10;
 
-        world.scene().add(mesh);
+        const parent = getCloudsAttachParent();
+        if (parent) parent.add(mesh);
+        else world.scene().add(mesh);
         globeCloudsMesh = mesh;
         return mesh;
       })
@@ -410,7 +557,8 @@
 
     if (globeCloudsMesh) {
       try {
-        if (world && typeof world.scene === 'function') world.scene().remove(globeCloudsMesh);
+        if (globeCloudsMesh.parent) globeCloudsMesh.parent.remove(globeCloudsMesh);
+        else if (world && typeof world.scene === 'function') world.scene().remove(globeCloudsMesh);
       } catch {
         /* ignore */
       }
@@ -430,14 +578,8 @@
     globeCloudsLoading = true;
     Promise.all([ensureCloudsMesh(), loadThreeForClouds()])
       .then(([mesh, three]) => {
-        if (!mesh || !globeCloudsEnabled) throw new Error('no mesh');
-        const loader = new three.TextureLoader();
-        try {
-          loader.setCrossOrigin && loader.setCrossOrigin('anonymous');
-        } catch {
-          /* ignore */
-        }
-        return loader.loadAsync(cloudsUrlForNow()).then((tex) => ({ mesh, tex }));
+        if (!mesh || !globeCloudsEnabled || !three) throw new Error('no mesh');
+        return three.loadTexture(cloudsUrlForNow()).then((tex) => ({ mesh, tex }));
       })
       .then(({ mesh, tex }) => {
         globeCloudsLoading = false;
@@ -453,9 +595,15 @@
         }
         scheduleCloudsRefresh();
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error('Cloud layer failed to load', err);
         globeCloudsLoading = false;
-        if (globeCloudsEnabled) scheduleCloudsRefresh();
+        globeCloudsEnabled = false;
+        saveGlobeCloudsEnabled(false);
+        const cb = document.getElementById('globe-clouds');
+        if (cb instanceof HTMLInputElement) cb.checked = false;
+        disposeClouds();
+        resetCloudsThreeCache();
       });
   }
 
@@ -463,9 +611,11 @@
     globeCloudsEnabled = !!enabled;
     saveGlobeCloudsEnabled(globeCloudsEnabled);
     if (globeCloudsEnabled) {
+      resetCloudsThreeCache();
       refreshCloudsTexture();
     } else {
       disposeClouds();
+      resetCloudsThreeCache();
     }
   }
 
@@ -497,18 +647,17 @@
 
   function startGlobeDayNightAnimation(material, solar) {
     stopGlobeDayNightAnimation();
-    let rafId = 0;
+    globeDayNightSolar = solar;
+    let intervalId = 0;
     const tick = () => {
       if (!globeDayNightMaterial || globeDayNightMaterial !== material) return;
-      const dt = Date.now();
-      material.uniforms.sunPosition.value.set(...sunPosAt(dt, solar));
-      rafId = requestAnimationFrame(tick);
+      material.uniforms.sunPosition.value.set(...sunPosAt(Date.now(), solar));
     };
-    material.uniforms.sunPosition.value.set(...sunPosAt(Date.now(), solar));
-    rafId = requestAnimationFrame(tick);
+    tick();
+    intervalId = setInterval(tick, GLOBE_DAY_NIGHT_UPDATE_MS);
     globeDayNightStopRaf = () => {
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = 0;
+      if (intervalId) clearInterval(intervalId);
+      intervalId = 0;
     };
   }
 
@@ -643,6 +792,11 @@
       disposeGlobeDayNightMaterial();
       applyStaticGlobeTheme(next);
     }
+    if (globeCloudsEnabled) {
+      disposeClouds();
+      resetCloudsThreeCache();
+      refreshCloudsTexture();
+    }
   }
 
   const webGLSupported = hasWebGLSupport();
@@ -659,7 +813,7 @@
         )
         .arcLabel('label')
         .arcDashLength(1)
-        // arcColor / arcStroke set in syncArcStylesAndData() for hover highlighting
+        // arcColor / arcStroke registered once after handlers are defined
         .pointColor(() => 'orange')
         .pointAltitude(0)
         .pointRadius(0.02)
@@ -727,6 +881,11 @@
   }
 
   window.addEventListener('pagehide', () => {
+    try {
+      saveHighlightRules();
+    } catch {
+      /* ignore */
+    }
     try {
       const p = world.pointOfView();
       if (p && Number.isFinite(p.lat)) savePovToStorage(p);
@@ -971,7 +1130,6 @@
     const sets = sortedRuleSets();
 
     if (sel instanceof HTMLSelectElement) {
-      const prev = sel.value;
       sel.replaceChildren();
       const none = document.createElement('option');
       none.value = '';
@@ -987,9 +1145,6 @@
         sel.value = ruleSetsState.activeSetId;
       } else {
         sel.value = '';
-      }
-      if (!sel.value && prev && [...sel.options].some((o) => o.value === prev)) {
-        sel.value = prev;
       }
     }
 
@@ -1010,6 +1165,7 @@
   function switchActiveRuleSet(setId) {
     saveHighlightRules();
     ruleSetsState.activeSetId = setId && ruleSetsState.sets[setId] ? setId : null;
+    saveRuleSetsState();
     applyHighlightRulesFromState();
     preloadAdTrackerListsForRules(highlightRules);
     syncRuleSetsUi();
@@ -1758,15 +1914,16 @@
   }
 
   function syncArcStylesAndData() {
-    const list = currentArcList();
     world
-      .arcColor(arcColorFor)
-      .arcStroke(arcStrokeFor)
-      .arcsData(list)
+      .arcsData(currentArcList())
       .arcStartLat('startLat')
       .arcStartLng('startLng')
       .arcEndLat('endLat')
       .arcEndLng('endLng');
+  }
+
+  if (webGLSupported) {
+    world.arcColor(arcColorFor).arcStroke(arcStrokeFor);
   }
 
   function syncTableRowHighlight() {
@@ -2208,6 +2365,13 @@
   let liveSearchQuery = '';
   /** @type {'include' | 'exclude'} */
   let liveSearchMode = 'include';
+  let historySearchQuery = '';
+  /** @type {'include' | 'exclude'} */
+  let historySearchMode = 'include';
+
+  let liveTableLastRenderKey = '';
+  const liveRowByKey = new Map();
+  let liveElapsedTimer = null;
 
   function loadLiveSearchQuery() {
     try {
@@ -2244,24 +2408,150 @@
     }
   }
 
-  function connectionMatchesLiveSearch(model, query) {
+  function loadHistorySearchQuery() {
+    try {
+      return localStorage.getItem(LS_HISTORY_SEARCH) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function saveHistorySearchQuery(q) {
+    try {
+      const s = String(q || '');
+      if (s) localStorage.setItem(LS_HISTORY_SEARCH, s);
+      else localStorage.removeItem(LS_HISTORY_SEARCH);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function loadHistorySearchMode() {
+    try {
+      const v = localStorage.getItem(LS_HISTORY_SEARCH_MODE);
+      return v === 'exclude' ? 'exclude' : 'include';
+    } catch {
+      return 'include';
+    }
+  }
+
+  function saveHistorySearchMode(mode) {
+    try {
+      localStorage.setItem(LS_HISTORY_SEARCH_MODE, mode === 'exclude' ? 'exclude' : 'include');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function modelMatchesTableSearch(model, query, cols, formatters) {
     const q = String(query || '').trim().toLowerCase();
     if (!q) return true;
-    for (const col of LIVE_SEARCH_COLS) {
-      const v = String(model[col] ?? '').toLowerCase();
+    for (const col of cols) {
+      let v = '';
+      if (formatters && typeof formatters[col] === 'function') {
+        v = formatters[col](model);
+      } else {
+        v = model[col];
+      }
+      v = String(v ?? '').toLowerCase();
       if (v && v !== '—' && v.includes(q)) return true;
     }
     return false;
   }
 
-  function filterModelsByLiveSearch(models, query, mode) {
+  function filterModelsByTableSearch(models, query, mode, cols, formatters) {
     const q = String(query || '').trim();
     if (!q) return models;
     const exclude = mode === 'exclude';
     return models.filter((m) => {
-      const matches = connectionMatchesLiveSearch(m, q);
+      const matches = modelMatchesTableSearch(m, q, cols, formatters);
       return exclude ? !matches : matches;
     });
+  }
+
+  function connectionMatchesLiveSearch(model, query) {
+    return modelMatchesTableSearch(model, query, LIVE_SEARCH_COLS);
+  }
+
+  function filterModelsByLiveSearch(models, query, mode) {
+    return filterModelsByTableSearch(models, query, mode, LIVE_SEARCH_COLS);
+  }
+
+  function filterHistoryBySearch(rows, query, mode) {
+    return filterModelsByTableSearch(rows, query, mode, HISTORY_SEARCH_COLS, {
+      time: (m) => formatHistoryTime(m.ts),
+    });
+  }
+
+  function escapeCsvField(value) {
+    const s = value == null ? '' : String(value);
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  function visibleExportColumnIds(which) {
+    const ids = which === 'live' ? LIVE_COL_IDS : HIST_COL_IDS;
+    const vis = which === 'live' ? colVisLive : colVisHist;
+    return ids.filter((id) => vis[id] !== false);
+  }
+
+  function liveModelExportValue(m, colId) {
+    if (colId === 'pid') return m.pidStr;
+    if (colId === 'createTime') return m.createTimeDisplay;
+    if (colId === 'elapsed') return m.elapsedDisplay;
+    return m[colId];
+  }
+
+  function historyModelExportValue(m, colId) {
+    if (colId === 'time') return formatHistoryTime(m.ts);
+    if (colId === 'pid') return m.pidStr;
+    return m[colId];
+  }
+
+  function downloadCsv(filename, colIds, rows, valueFn) {
+    const header = colIds.map((id) => escapeCsvField(COL_DISPLAY_LABEL[id] || id)).join(',');
+    const lines = rows.map((row) =>
+      colIds.map((id) => escapeCsvField(valueFn(row, id))).join(',')
+    );
+    const csv = `${header}\r\n${lines.join('\r\n')}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportLiveCsv() {
+    const placesByKey = new Map();
+    const mergedA = filterArcsByProtocol(buildMergedArcsList(lastArcs), getLiveProtocolFilter());
+    for (const a of mergedA) {
+      if (a && a.connectionKey) {
+        placesByKey.set(a.connectionKey, {
+          start: a.startPlace || '—',
+          end: a.endPlace || '—',
+        });
+      }
+    }
+    const mergedC = filterConnectionsByProtocol(buildMergedConnections(), getLiveProtocolFilter());
+    const allModels = mergedC.map((c) => connectionRowModel(c, placesByKey));
+    allModels.sort(compareConnectionModels);
+    const models = filterModelsByLiveSearch(allModels, liveSearchQuery, liveSearchMode);
+    const colIds = visibleExportColumnIds('live');
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv(`netstat-globe-live-${stamp}.csv`, colIds, models, liveModelExportValue);
+  }
+
+  function exportHistoryCsv() {
+    let rows = filterConnectionsByProtocol([...connectionHistory], getHistoryProtocolFilter());
+    rows = filterHistoryBySearch(rows, historySearchQuery, historySearchMode);
+    rows.sort(compareHistoryModels);
+    const colIds = visibleExportColumnIds('history');
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv(`netstat-globe-history-${stamp}.csv`, colIds, rows, historyModelExportValue);
   }
 
   function getHistoryProtocolFilter() {
@@ -2322,11 +2612,21 @@
       : `Showing no ${nounPlural}`;
   }
 
+  function scheduleHistoryTableRender() {
+    historyTableDirty = true;
+    if (activeDrawerTab !== 'history' || pageHidden) return;
+    if (historyRenderTimer) return;
+    historyRenderTimer = setTimeout(() => {
+      historyRenderTimer = null;
+      historyTableDirty = false;
+      renderHistoryTable();
+    }, 120);
+  }
+
   function refreshTableAndArcs() {
     const mergedA = buildMergedArcsList(lastArcs);
     const mode = getLiveProtocolFilter();
     const filteredA = filterArcsByProtocol(mergedA, mode);
-    applyArcs(filteredA);
     const mergedC = buildMergedConnections();
     const filteredC = filterConnectionsByProtocol(mergedC, mode);
     const arcsByKey = new Map();
@@ -2341,9 +2641,22 @@
       }
     }
     matchStyleByConnectionKey = computeMatchStyles(filteredC, placesByKey, arcsByKey);
-    renderConnectionsTable(filteredC, filteredA);
-    syncTableRowHighlight();
     updateArcCountLabel();
+
+    if (pageHidden) {
+      liveTableDirty = true;
+      return;
+    }
+
+    applyArcs(filteredA);
+
+    if (activeDrawerTab === 'live') {
+      renderConnectionsTable(filteredC, filteredA);
+      syncTableRowHighlight();
+      liveTableDirty = false;
+    } else {
+      liveTableDirty = true;
+    }
   }
 
   function scheduleFlashPrune() {
@@ -2444,7 +2757,7 @@
       pidStr: conn.owningPid != null ? String(conn.owningPid) : '—',
     });
     trimHistory();
-    renderHistoryTable();
+    scheduleHistoryTableRender();
   }
 
   function compareHistoryModels(a, b) {
@@ -2484,6 +2797,7 @@
 
     const rawLen = connectionHistory.length;
     let rows = filterConnectionsByProtocol([...connectionHistory], getHistoryProtocolFilter());
+    rows = filterHistoryBySearch(rows, historySearchQuery, historySearchMode);
     rows.sort(compareHistoryModels);
 
     const visibleColCount = countVisibleCols('history');
@@ -2498,7 +2812,11 @@
       td.textContent =
         rawLen === 0
           ? 'No connection events yet.'
-          : 'No events match the protocol filter.';
+          : historySearchQuery.trim()
+            ? historySearchMode === 'exclude'
+              ? 'No events to show (all rows excluded by search).'
+              : 'No events match your search.'
+            : 'No events match the protocol filter.';
       tr.appendChild(td);
       tbody.appendChild(tr);
       syncHistoryTableHeaderSortState();
@@ -2544,6 +2862,9 @@
   function initHistoryTableUi() {
     const histColsBtn = document.getElementById('history-choose-columns');
     histColsBtn && histColsBtn.addEventListener('click', () => openChooseColumnsDialog('history'));
+
+    const histExportBtn = document.getElementById('history-export-csv');
+    histExportBtn && histExportBtn.addEventListener('click', () => exportHistoryCsv());
 
     const maxInp = document.getElementById('history-max-rows');
     if (maxInp) {
@@ -2611,18 +2932,46 @@
       modeSel.addEventListener('change', () => {
         liveSearchMode = modeSel.value === 'exclude' ? 'exclude' : 'include';
         saveLiveSearchMode(liveSearchMode);
+        liveTableLastRenderKey = '';
         refreshTableAndArcs();
       });
     }
 
     const inp = document.getElementById('live-connections-search');
-    if (!(inp instanceof HTMLInputElement)) return;
-    inp.value = liveSearchQuery;
-    inp.addEventListener('input', () => {
-      liveSearchQuery = inp.value;
-      saveLiveSearchQuery(liveSearchQuery);
-      refreshTableAndArcs();
-    });
+    if (inp instanceof HTMLInputElement) {
+      inp.value = liveSearchQuery;
+      inp.addEventListener('input', () => {
+        liveSearchQuery = inp.value;
+        saveLiveSearchQuery(liveSearchQuery);
+        liveTableLastRenderKey = '';
+        refreshTableAndArcs();
+      });
+    }
+  }
+
+  function initHistorySearch() {
+    historySearchQuery = loadHistorySearchQuery();
+    historySearchMode = loadHistorySearchMode();
+
+    const modeSel = document.getElementById('history-search-mode');
+    if (modeSel instanceof HTMLSelectElement) {
+      modeSel.value = historySearchMode;
+      modeSel.addEventListener('change', () => {
+        historySearchMode = modeSel.value === 'exclude' ? 'exclude' : 'include';
+        saveHistorySearchMode(historySearchMode);
+        renderHistoryTable();
+      });
+    }
+
+    const inp = document.getElementById('history-connections-search');
+    if (inp instanceof HTMLInputElement) {
+      inp.value = historySearchQuery;
+      inp.addEventListener('input', () => {
+        historySearchQuery = inp.value;
+        saveHistorySearchQuery(historySearchQuery);
+        renderHistoryTable();
+      });
+    }
   }
 
   function initProtocolFilters() {
@@ -2638,6 +2987,7 @@
         } catch {
           /* ignore */
         }
+        liveTableLastRenderKey = '';
         refreshTableAndArcs();
       });
     }
@@ -2690,6 +3040,7 @@
 
     function selectTab(which) {
       const w = normalizeTab(which);
+      activeDrawerTab = w;
       const isLive = w === 'live';
       const isHist = w === 'history';
       const isRules = w === 'highlight-rules';
@@ -2716,6 +3067,18 @@
         syncRuleSetsUi();
         renderSettingsRules();
       }
+      if (isLive && liveTableDirty) {
+        liveTableDirty = false;
+        refreshTableAndArcs();
+      }
+      if (isHist && historyTableDirty) {
+        historyTableDirty = false;
+        if (historyRenderTimer) {
+          clearTimeout(historyRenderTimer);
+          historyRenderTimer = null;
+        }
+        renderHistoryTable();
+      }
     }
 
     liveTab.addEventListener('click', () => selectTab('live'));
@@ -2731,6 +3094,9 @@
     const liveColsBtn = document.getElementById('live-choose-columns');
     liveColsBtn && liveColsBtn.addEventListener('click', () => openChooseColumnsDialog('live'));
 
+    const liveExportBtn = document.getElementById('live-export-csv');
+    liveExportBtn && liveExportBtn.addEventListener('click', () => exportLiveCsv());
+
     const thead = document.querySelector('#live-connections-table thead');
     if (thead) {
       thead.addEventListener('click', (e) => {
@@ -2745,6 +3111,7 @@
         }
         localStorage.setItem(LS_SORT_KEY, tableSort.key);
         localStorage.setItem(LS_SORT_DIR, tableSort.dir);
+        liveTableLastRenderKey = '';
         refreshTableAndArcs();
       });
       thead.addEventListener('keydown', (e) => {
@@ -2849,10 +3216,30 @@
     }
   }
 
-  function renderConnectionsTable(connections, arcs) {
-    const tbody = document.getElementById('connections-tbody');
-    if (!tbody) return;
+  function formatElapsedFromMs(createTimeMs, nowMs) {
+    if (createTimeMs == null) return '—';
+    const sec = Math.max(0, Math.floor((nowMs - createTimeMs) / 1000));
+    if (sec < 60) return `${sec}s`;
+    if (sec < 3600) {
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return `${m}m ${s}s`;
+    }
+    if (sec < 86400) {
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      return `${h}h ${m}m ${s}s`;
+    }
+    const d = Math.floor(sec / 86400);
+    const rest = sec % 86400;
+    const h = Math.floor(rest / 3600);
+    const m = Math.floor((rest % 3600) / 60);
+    const s = rest % 60;
+    return `${d}d ${h}h ${m}m ${s}s`;
+  }
 
+  function buildLivePlacesByKey(arcs) {
     const placesByKey = new Map();
     for (const a of arcs || []) {
       if (a && a.connectionKey) {
@@ -2862,99 +3249,216 @@
         });
       }
     }
+    return placesByKey;
+  }
 
+  function buildLiveTableModels(connections, arcs) {
+    const placesByKey = buildLivePlacesByKey(arcs);
     const allModels = (connections || []).map((c) => connectionRowModel(c, placesByKey));
     allModels.sort(compareConnectionModels);
     const searchQ = String(liveSearchQuery || '').trim();
     const models = filterModelsByLiveSearch(allModels, searchQ, liveSearchMode);
+    return { allModels, models, placesByKey };
+  }
 
-    const visibleColCount = countVisibleCols('live') + 1;
+  function liveTableRenderKey() {
+    return [
+      tableSort.key,
+      tableSort.dir,
+      liveSearchQuery,
+      liveSearchMode,
+      getLiveProtocolFilter(),
+    ].join('|');
+  }
 
+  function liveTableNeedsFullRender(allModels, models, renderKey) {
+    if (renderKey !== liveTableLastRenderKey) return true;
+    if (allModels.length === 0) return true;
+    if (models.length === 0 && allModels.length > 0) return true;
+    if (liveRowByKey.size === 0 && models.length > 0) return true;
+    return false;
+  }
+
+  function appendLiveTableCell(tr, colDef, text, copyModel) {
+    const td = document.createElement('td');
+    td.setAttribute('data-col', colDef.id);
+    if (colDef.mono) td.classList.add('mono');
+    if (colDef.origin) td.classList.add('col-origin');
+    td.textContent = text;
+    wireCopyableAddressCell(td, colDef.id, copyModel);
+    tr.appendChild(td);
+  }
+
+  function createLiveTableRow(m, nowMs) {
+    const tr = document.createElement('tr');
+    const ck = m.connectionKey != null ? String(m.connectionKey) : '';
+    if (ck) tr.setAttribute('data-connection-key', ck);
+
+    const tdDot = document.createElement('td');
+    tdDot.className = 'col-rule-dot';
+    const dot = document.createElement('span');
+    dot.className = 'rule-dot';
+    tdDot.appendChild(dot);
+    tr.appendChild(tdDot);
+
+    for (const col of TABLE_COL_DEFS) {
+      const field = col.id === 'pid' ? 'pidStr' : col.id;
+      appendLiveTableCell(tr, col, m[field], m);
+    }
+    for (const col of LIVE_EXTRA_COL_DEFS) {
+      const text = col.id === 'createTime' ? m.createTimeDisplay : m.elapsedDisplay;
+      appendLiveTableCell(tr, col, text, m);
+    }
+
+    if (ck) {
+      tr.addEventListener('mouseenter', () => setLinkedHighlight(ck));
+      tr.addEventListener('mouseleave', () => clearLinkedHighlightIf(ck));
+    }
+
+    tr.__rowModel = m;
+    updateLiveTableRowInPlace(tr, m, nowMs);
+    return tr;
+  }
+
+  function setLiveTableCellText(tr, colId, text) {
+    const td = tr.querySelector(`[data-col="${colId}"]`);
+    if (td && td.textContent !== text) td.textContent = text;
+  }
+
+  function updateLiveTableRowInPlace(tr, m, nowMs) {
+    tr.__rowModel = m;
+    const ck = m.connectionKey != null ? String(m.connectionKey) : '';
+
+    for (const col of TABLE_COL_DEFS) {
+      const field = col.id === 'pid' ? 'pidStr' : col.id;
+      setLiveTableCellText(tr, col.id, m[field]);
+    }
+    setLiveTableCellText(tr, 'createTime', m.createTimeDisplay);
+    setLiveTableCellText(
+      tr,
+      'elapsed',
+      formatElapsedFromMs(m.createTimeMs, nowMs)
+    );
+
+    const dot = tr.querySelector('.rule-dot');
+    const style = ck ? matchStyleByConnectionKey.get(ck) : null;
+    if (dot) {
+      dot.classList.toggle('rule-dot-active', !!(style && style.color));
+      dot.style.background = style && style.color ? style.color : '';
+      const tip = style && style.ruleLabel ? String(style.ruleLabel) : '';
+      dot.title = tip;
+      const tdDot = dot.parentElement;
+      if (tdDot) tdDot.title = tip;
+    }
+
+    tr.classList.remove('row-flash-new', 'row-flash-removed');
+    const fk = ck ? flashState.get(ck) : null;
+    if (fk && fk.until > nowMs) {
+      if (fk.kind === 'new') tr.classList.add('row-flash-new');
+      if (fk.kind === 'removed') tr.classList.add('row-flash-removed');
+    }
+  }
+
+  function renderLiveTableEmpty(tbody, visibleColCount, message) {
+    liveRowByKey.clear();
     tbody.replaceChildren();
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = visibleColCount;
+    td.className = 'connections-empty';
+    td.textContent = message;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+
+  function renderConnectionsTableFull(tbody, allModels, models, visibleColCount) {
+    liveRowByKey.clear();
+    tbody.replaceChildren();
+    const nowMs = Date.now();
+
+    for (const m of models) {
+      const tr = createLiveTableRow(m, nowMs);
+      const ck = String(m.connectionKey);
+      liveRowByKey.set(ck, tr);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function updateLiveTableIncremental(tbody, models) {
+    const nowMs = Date.now();
+    const nextKeys = new Set();
+
+    for (const m of models) {
+      const ck = String(m.connectionKey);
+      nextKeys.add(ck);
+      let tr = liveRowByKey.get(ck);
+      if (!tr) {
+        tr = createLiveTableRow(m, nowMs);
+        liveRowByKey.set(ck, tr);
+      } else {
+        updateLiveTableRowInPlace(tr, m, nowMs);
+      }
+      tbody.appendChild(tr);
+    }
+
+    for (const [ck, tr] of liveRowByKey) {
+      if (!nextKeys.has(ck)) {
+        tr.remove();
+        liveRowByKey.delete(ck);
+      }
+    }
+  }
+
+  function updateLiveElapsedCellsOnly() {
+    if (activeDrawerTab !== 'live' || pageHidden || liveRowByKey.size === 0) return;
+    const nowMs = Date.now();
+    for (const tr of liveRowByKey.values()) {
+      const m = tr.__rowModel;
+      if (!m) continue;
+      setLiveTableCellText(tr, 'elapsed', formatElapsedFromMs(m.createTimeMs, nowMs));
+    }
+  }
+
+  function startLiveElapsedTimer() {
+    if (liveElapsedTimer) return;
+    liveElapsedTimer = setInterval(updateLiveElapsedCellsOnly, 1000);
+  }
+
+  function renderConnectionsTable(connections, arcs) {
+    const tbody = document.getElementById('connections-tbody');
+    if (!tbody) return;
+
+    const { allModels, models } = buildLiveTableModels(connections, arcs);
+    const visibleColCount = countVisibleCols('live') + 1;
+    const renderKey = liveTableRenderKey();
 
     if (allModels.length === 0) {
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.colSpan = visibleColCount;
-      td.className = 'connections-empty';
-      td.textContent = 'No connections.';
-      tr.appendChild(td);
-      tbody.appendChild(tr);
+      liveTableLastRenderKey = renderKey;
+      renderLiveTableEmpty(tbody, visibleColCount, 'No connections.');
       syncTableHeaderSortState();
       applyColumnVisibility('live');
       return;
     }
 
     if (models.length === 0) {
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.colSpan = visibleColCount;
-      td.className = 'connections-empty';
-      td.textContent =
+      liveTableLastRenderKey = renderKey;
+      renderLiveTableEmpty(
+        tbody,
+        visibleColCount,
         liveSearchMode === 'exclude'
           ? 'No connections to show (all rows excluded by search).'
-          : 'No connections match your search.';
-      tr.appendChild(td);
-      tbody.appendChild(tr);
+          : 'No connections match your search.'
+      );
       syncTableHeaderSortState();
       applyColumnVisibility('live');
       return;
     }
 
-    function appendCell(tr, colDef, text, copyModel) {
-      const td = document.createElement('td');
-      td.setAttribute('data-col', colDef.id);
-      if (colDef.mono) td.classList.add('mono');
-      if (colDef.origin) td.classList.add('col-origin');
-      td.textContent = text;
-      wireCopyableAddressCell(td, colDef.id, copyModel);
-      tr.appendChild(td);
-    }
-
-    const nowMs = Date.now();
-
-    for (const m of models) {
-      const tr = document.createElement('tr');
-      const ck = m.connectionKey != null ? String(m.connectionKey) : '';
-      if (ck) tr.setAttribute('data-connection-key', ck);
-
-      const tdDot = document.createElement('td');
-      tdDot.className = 'col-rule-dot';
-      const dot = document.createElement('span');
-      dot.className = 'rule-dot';
-      const style = ck ? matchStyleByConnectionKey.get(ck) : null;
-      if (style && style.color) {
-        dot.classList.add('rule-dot-active');
-        dot.style.background = style.color;
-        const tip = style.ruleLabel ? String(style.ruleLabel) : '';
-        if (tip) {
-          dot.title = tip;
-          tdDot.title = tip;
-        }
-      }
-      tdDot.appendChild(dot);
-      tr.appendChild(tdDot);
-
-      const fk = ck ? flashState.get(ck) : null;
-      if (fk && fk.until > nowMs) {
-        if (fk.kind === 'new') tr.classList.add('row-flash-new');
-        if (fk.kind === 'removed') tr.classList.add('row-flash-removed');
-      }
-
-      for (const col of TABLE_COL_DEFS) {
-        const field = col.id === 'pid' ? 'pidStr' : col.id;
-        appendCell(tr, col, m[field], m);
-      }
-      for (const col of LIVE_EXTRA_COL_DEFS) {
-        const text = col.id === 'createTime' ? m.createTimeDisplay : m.elapsedDisplay;
-        appendCell(tr, col, text, m);
-      }
-      tbody.appendChild(tr);
-
-      if (ck) {
-        tr.addEventListener('mouseenter', () => setLinkedHighlight(ck));
-        tr.addEventListener('mouseleave', () => clearLinkedHighlightIf(ck));
-      }
+    if (liveTableNeedsFullRender(allModels, models, renderKey)) {
+      liveTableLastRenderKey = renderKey;
+      renderConnectionsTableFull(tbody, allModels, models, visibleColCount);
+    } else {
+      updateLiveTableIncremental(tbody, models);
     }
 
     syncTableHeaderSortState();
@@ -3253,7 +3757,39 @@
   }
 
   let ws;
+  let wsReconnectTimer = null;
+
+  function setPageHidden(hidden) {
+    pageHidden = hidden;
+    if (hidden) {
+      if (typeof world.pauseAnimation === 'function') world.pauseAnimation();
+      stopGlobeDayNightAnimation();
+      return;
+    }
+    if (typeof world.resumeAnimation === 'function') world.resumeAnimation();
+    if (
+      globeDayNightMaterial &&
+      globeDayNightSolar &&
+      currentGlobeTheme === GLOBE_THEME_REALTIME
+    ) {
+      startGlobeDayNightAnimation(globeDayNightMaterial, globeDayNightSolar);
+    }
+    refreshTableAndArcs();
+    if (historyTableDirty && activeDrawerTab === 'history') {
+      historyTableDirty = false;
+      renderHistoryTable();
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    setPageHidden(document.hidden);
+  });
+
   function connect() {
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
     ws = new WebSocket(wsUrl);
     ws.onopen = () => {
       statusEl.textContent = 'Live';
@@ -3281,7 +3817,11 @@
     };
     ws.onclose = () => {
       statusEl.textContent = 'Reconnecting…';
-      setTimeout(connect, 2000);
+      if (wsReconnectTimer) return;
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        connect();
+      }, 2000);
     };
     ws.onerror = () => {
       statusEl.textContent = 'Connection error';
@@ -3315,8 +3855,10 @@
   initChooseColumnsDialog();
   initProtocolFilters();
   initLiveSearch();
+  initHistorySearch();
   applyAllColumnVisibility();
   connect();
+  startLiveElapsedTimer();
 
   const drawer = document.getElementById('drawer');
   const drawerTab = document.getElementById('drawer-tab');

@@ -9,7 +9,8 @@ Real-time network connections on a 3D globe. A small Node.js server polls active
 - Live **TCP Established** connections + **UDP endpoints**
 - **3D globe** visualization with arcs; **Real-time Day/Night**, static **Night** or **Day**, or **Zoomable Administrative Boundaries** map tiles (Settings)
 - Connection **drawer** with **Live**, **History**, **Highlight Rules**, and **Settings** tabs
-- **Live search** across process, local, remote, remote host, from, and to — **Include** or **Exclude** mode (saved in the browser)
+- **Live search** and **History search** across connection fields — **Include** or **Exclude** mode (saved in the browser)
+- **Export CSV** on Live and History tabs (download icon)
 - **Highlight & notification rules** — color matching arcs on the globe, a colored dot on matching live rows, optional browser notifications, and hover tooltips showing the rule label
 - **Rule sets** — save, switch, rename, and delete named sets of highlight rules (stored in the browser)
 - **Ad Tracker List** filter — match remote hostnames against hosted block lists (e.g. EasyList)
@@ -23,8 +24,8 @@ Real-time network connections on a 3D globe. A small Node.js server polls active
 
 | Tab | Purpose |
 |-----|---------|
-| **Live** | Current connections, search, protocol filter, column visibility |
-| **History** | Closed / past connections with its own sort and filters |
+| **Live** | Current connections, search, protocol filter, column visibility, CSV export |
+| **History** | Closed / past connections with search, sort, filters, column visibility, CSV export |
 | **Highlight Rules** | Create and manage rules and rule sets |
 | **Settings** | Connection source, globe theme, update frequency |
 
@@ -58,7 +59,9 @@ The choice is saved in your browser (`localStorage`). If the real-time shader fa
 
 ### Globe clouds
 
-Enable **Show clouds (updated every 3 hours)** to overlay a static clouds texture on top of the globe. The image is re-fetched every 3 hours from `https://clouds.matteason.co.uk/images/8192x4096/clouds.jpg`.
+Enable **Show clouds (updated every 3 hours)** to overlay a semi-transparent cloud layer above the globe surface. The texture is re-fetched every 3 hours from [Matteason’s cloud map](https://clouds.matteason.co.uk/) (`clouds-alpha.png`). The layer is placed at a fixed altitude above the modeled Earth radius (currently **500,000 ft**, scaled to the globe’s radius in the 3D scene). The choice is saved in your browser (`localStorage`).
+
+Clouds work with all globe themes, including **Real-time Day/Night** (the app reuses Three.js from the globe scene, with a fallback loader if needed). Changing the globe theme rebuilds the cloud layer when clouds are enabled.
 
 ### Update frequency
 

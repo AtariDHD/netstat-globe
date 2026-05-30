@@ -13,6 +13,10 @@ body {
   color: #e2e8f0;
 }
 
+select, input:not([type="checkbox"]), button {
+  min-height: 1.8rem;
+}
+
 .app-shell {
   display: flex;
   flex-direction: row;
@@ -378,8 +382,15 @@ body {
   color: #94a3b8;
 }
 
+.connection-source-settings-help {
+  margin: 0;
+  padding-left: 1.5em;
+  list-style: circle;
+}
+
 .settings-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
   padding: 0.45rem 0.35rem;
@@ -423,7 +434,7 @@ body {
   font: inherit;
   font-size: 0.8rem;
   cursor: pointer;
-  width: 100%;
+  flex-grow: 1;
 }
 
 .settings-select:hover {
@@ -679,6 +690,13 @@ body {
   }
 }
 
+.toolbar-buttons-right {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-left: auto;
+}
+
 .history-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -690,6 +708,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.65rem;
+  margin-left: auto;
 }
 
 .history-max-label {
@@ -701,7 +720,7 @@ body {
 }
 
 .history-max-label input {
-  width: 4.5rem;
+  width: 4rem;
   padding: 0.2rem 0.35rem;
   border-radius: 6px;
   border: 1px solid #334155;
@@ -740,6 +759,60 @@ body {
   outline-offset: 2px;
 }
 
+.table-export-btn {
+  padding: 0.35rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: rgba(15, 23, 42, 0.85);
+  color: #cbd5e1;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.table-export-btn:hover {
+  background: rgba(30, 41, 59, 0.95);
+  border-color: #475569;
+  color: #f1f5f9;
+}
+
+.table-export-btn:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.45);
+  outline-offset: 1px;
+}
+
+.table-export-btn.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  min-width: 1.9rem;
+}
+
+.table-export-btn.icon-btn .material-symbols-outlined {
+  font-size: 1.05rem;
+}
+
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined', sans-serif;
+  font-weight: normal;
+  font-style: normal;
+  font-size: 1.25rem;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-variation-settings:
+    'FILL' 0,
+    'wght' 400,
+    'GRAD' 0,
+    'opsz' 24;
+}
+
 .choose-columns-btn {
   padding: 0.3rem 0.65rem;
   border-radius: 6px;
@@ -750,7 +823,18 @@ body {
   font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
-  margin-left: auto;
+}
+
+.choose-columns-btn.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  min-width: 1.9rem;
+}
+
+.choose-columns-btn.icon-btn .material-symbols-outlined {
+  font-size: 0.85rem;
 }
 
 .choose-columns-btn:hover {
